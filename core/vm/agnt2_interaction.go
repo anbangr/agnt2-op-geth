@@ -24,6 +24,7 @@ const (
 	revertStepOverflow      byte = 0x03 // step_count * 160 exceeds the calldata size limit
 	revertTrieWriteFailed   byte = 0x04 // MMR leaf write failed (Week 10 only)
 	revertNotImplemented    byte = 0x05 // stepCount > 0 in Week 9 — MMR writer is Week 10 scope
+	revertWorkflowIDInvalid byte = 0x06 // workflow_id parsing failed (offset, length, padding, range)
 )
 
 const (
@@ -34,7 +35,54 @@ const (
 	// TestMaxSafeLeafCount_Bounds. /review re-iteration flagged the prior
 	// derivation as brittle to constant edits.
 	maxSafeLeafCount uint64 = 26_843_545
+	maxWorkflowIDLen        = 1024
 )
+
+// parseWorkflowID reads an ABI-encoded string (workflow_id) starting at byte 5
+// of the calldata. It returns the raw string bytes, the total size of the ABI
+// header (offset word, length word, string bytes + padding), and any error byte.
+func parseWorkflowID(input []byte) ([]byte, uint64, byte) {
+	if len(input) < 5+64 {
+		return nil, 0, revertWorkflowIDInvalid
+	}
+
+	// Read offset (must be 0x20 for single dynamic arg)
+	for i := 5; i < 36; i++ {
+		if input[i] != 0 {
+			return nil, 0, revertWorkflowIDInvalid
+		}
+	}
+	if input[36] != 0x20 {
+		return nil, 0, revertWorkflowIDInvalid
+	}
+
+	// Read length (must be >0 and <= maxWorkflowIDLen)
+	for i := 37; i < 65; i++ {
+		if input[i] != 0 {
+			return nil, 0, revertWorkflowIDInvalid
+		}
+	}
+	length := binary.BigEndian.Uint32(input[65:69])
+	if length == 0 || length > maxWorkflowIDLen {
+		return nil, 0, revertWorkflowIDInvalid
+	}
+
+	paddedLen := uint64((length + 31) / 32 * 32)
+	if uint64(len(input)) < 5+64+paddedLen {
+		return nil, 0, revertWorkflowIDInvalid
+	}
+
+	// Validate zero padding
+	for i := uint32(69) + length; i < uint32(69)+uint32(paddedLen); i++ {
+		if input[i] != 0 {
+			return nil, 0, revertWorkflowIDInvalid
+		}
+	}
+
+	id := input[69 : uint32(69)+length]
+	abiHeaderSize := 64 + paddedLen
+	return id, abiHeaderSize, 0
+}
 
 type agnt2Interaction struct{}
 
@@ -63,7 +111,12 @@ func (c *agnt2Interaction) RequiredGas(input []byte) uint64 {
 	if stepCount > maxSafeLeafCount {
 		return params.AGNT2BaseGas
 	}
-	expectedLen := uint64(5) + stepCount*agnt2LeafSize
+	_, abiHeaderSize, errCode := parseWorkflowID(input)
+	if errCode != 0 {
+		return params.AGNT2BaseGas
+	}
+
+	expectedLen := uint64(5) + abiHeaderSize + stepCount*agnt2LeafSize
 	if uint64(len(input)) != expectedLen {
 		return params.AGNT2BaseGas
 	}
@@ -89,6 +142,12 @@ func (c *agnt2Interaction) Run(input []byte) ([]byte, error) {
 		return []byte{revertStepOverflow}, ErrAGNT2Reverted
 	}
 
+	workflowID, abiHeaderSize, errCode := parseWorkflowID(input)
+	if errCode != 0 {
+		return []byte{errCode}, ErrAGNT2Reverted
+	}
+	_ = workflowID // forward compatibility for Phase 3
+
 	// uint64 math throughout. On 32-bit Go builds, int(stepCount)*160 silently
 	// overflows when stepCount > int32-max / agnt2LeafSize ≈ 13_421_772, even
 	// though maxSafeLeafCount allows up to 26_843_545. uint64 closes that gap.
@@ -99,7 +158,7 @@ func (c *agnt2Interaction) Run(input []byte) ([]byte, error) {
 	// format. Week 10 will widen this to allow workflow_id ABI prefix bytes,
 	// at which point the equality switches to an exact computed length that
 	// includes the parsed string size.
-	expectedLen := uint64(5) + stepCount*agnt2LeafSize
+	expectedLen := uint64(5) + abiHeaderSize + stepCount*agnt2LeafSize
 	if uint64(len(input)) != expectedLen {
 		return []byte{revertMalformedCalldata}, ErrAGNT2Reverted
 	}

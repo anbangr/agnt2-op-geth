@@ -8,21 +8,108 @@ import (
 	"github.com/ethereum/go-ethereum/params"
 )
 
-// makeInput builds calldata: version + stepCount(BE uint32) + body bytes.
-// Body is filled with a non-zero pattern so Week 10 leaf parsing won't pass
-// for the wrong reason (zero bytes are a valid leaf-of-zeros which would
-// silently satisfy a future workflow_id check).
-func makeInput(version byte, stepCount uint32, bodyBytes int) []byte {
-	buf := make([]byte, 5+bodyBytes)
+// makeInputWithWfID builds calldata: version + stepCount(BE uint32) + workflowID ABI string + body bytes.
+func makeInputWithWfID(version byte, wfID string, stepCount uint32, bodyBytes int) []byte {
+	idBytes := []byte(wfID)
+	l := len(idBytes)
+	paddedLen := (l + 31) / 32 * 32
+	
+	buf := make([]byte, 5+64+paddedLen+bodyBytes)
 	buf[0] = version
 	binary.BigEndian.PutUint32(buf[1:5], stepCount)
+	
+	// offset (0x20)
+	buf[36] = 0x20
+	
+	// length
+	binary.BigEndian.PutUint32(buf[65:69], uint32(l))
+	
+	// string bytes
+	copy(buf[69:69+l], idBytes)
+	
+	// body
 	if bodyBytes > 0 {
 		// 0xAB pattern is recognizable in test failures and not all-zero.
-		for i := 5; i < len(buf); i++ {
+		for i := 5 + 64 + paddedLen; i < len(buf); i++ {
 			buf[i] = 0xAB
 		}
 	}
 	return buf
+}
+
+// makeInput defaults to a valid workflowID so existing tests continue to test what they meant to.
+func makeInput(version byte, stepCount uint32, bodyBytes int) []byte {
+	return makeInputWithWfID(version, "test-wf", stepCount, bodyBytes)
+}
+
+func TestParseWorkflowID_Valid(t *testing.T) {
+	c := &agnt2Interaction{}
+	out, err := c.Run(makeInputWithWfID(0x00, "test-wf-001", 1, int(agnt2LeafSize)))
+	if !errors.Is(err, ErrAGNT2Reverted) {
+		t.Fatalf("expected ErrAGNT2Reverted, got %v", err)
+	}
+	if len(out) != 1 || out[0] != revertNotImplemented {
+		t.Fatalf("expected 0x05, got %v", out)
+	}
+}
+
+func TestParseWorkflowID_EmptyRejected(t *testing.T) {
+	c := &agnt2Interaction{}
+	out, err := c.Run(makeInputWithWfID(0x00, "", 1, int(agnt2LeafSize)))
+	if !errors.Is(err, ErrAGNT2Reverted) {
+		t.Fatalf("expected ErrAGNT2Reverted, got %v", err)
+	}
+	if len(out) != 1 || out[0] != revertWorkflowIDInvalid {
+		t.Fatalf("expected 0x06, got %v", out)
+	}
+}
+
+func TestParseWorkflowID_BadOffset(t *testing.T) {
+	c := &agnt2Interaction{}
+	input := makeInputWithWfID(0x00, "test", 1, int(agnt2LeafSize))
+	input[36] = 0x40 // Corrupt offset
+	out, err := c.Run(input)
+	if !errors.Is(err, ErrAGNT2Reverted) || out[0] != revertWorkflowIDInvalid {
+		t.Fatalf("expected 0x06, got %v", out)
+	}
+}
+
+func TestParseWorkflowID_LengthTooBig(t *testing.T) {
+	c := &agnt2Interaction{}
+	input := makeInputWithWfID(0x00, "test", 1, int(agnt2LeafSize))
+	binary.BigEndian.PutUint32(input[65:69], maxWorkflowIDLen+1) // Corrupt length
+	out, err := c.Run(input)
+	if !errors.Is(err, ErrAGNT2Reverted) || out[0] != revertWorkflowIDInvalid {
+		t.Fatalf("expected 0x06, got %v", out)
+	}
+}
+
+func TestParseWorkflowID_NonZeroPadding(t *testing.T) {
+	c := &agnt2Interaction{}
+	input := makeInputWithWfID(0x00, "test", 1, int(agnt2LeafSize))
+	input[69+4] = 0xFF // Corrupt padding
+	out, err := c.Run(input)
+	if !errors.Is(err, ErrAGNT2Reverted) || out[0] != revertWorkflowIDInvalid {
+		t.Fatalf("expected 0x06, got %v", out)
+	}
+}
+
+func TestParseWorkflowID_TrailingBytes(t *testing.T) {
+	c := &agnt2Interaction{}
+	input := makeInputWithWfID(0x00, "test", 1, int(agnt2LeafSize))
+	input = append(input, 0x00) // extra byte
+	out, err := c.Run(input)
+	if !errors.Is(err, ErrAGNT2Reverted) || out[0] != revertMalformedCalldata {
+		t.Fatalf("expected 0x02, got %v", out)
+	}
+}
+
+func TestParseWorkflowID_ZeroSteps(t *testing.T) {
+	c := &agnt2Interaction{}
+	out, err := c.Run(makeInputWithWfID(0x00, "hello", 0, 0))
+	if err != nil || out != nil {
+		t.Fatalf("zero steps should succeed, got %v, %v", out, err)
+	}
 }
 
 func TestRun_SuccessZeroSteps(t *testing.T) {
@@ -118,7 +205,7 @@ func TestRun_StepOverflow(t *testing.T) {
 func TestRun_BoundaryAtMaxSafeLeafCount(t *testing.T) {
 	c := &agnt2Interaction{}
 	// stepCount = maxSafeLeafCount must NOT trigger STEP_OVERFLOW. Sending only
-	// the 5-byte header surfaces MALFORMED instead. Confirms `> max` not `>= max`.
+	// the header surfaces MALFORMED instead. Confirms `> max` not `>= max`.
 	atMax := uint32(maxSafeLeafCount)
 	input := makeInput(0x00, atMax, 0)
 	out, err := c.Run(input)
@@ -148,10 +235,10 @@ func TestRequiredGas(t *testing.T) {
 		{"valid 100 steps (Week 9 revert)", makeInput(0x00, 100, 16000), params.AGNT2BaseGas},
 		{"overflow stepCount -> base only", makeInput(0x00, uint32(maxSafeLeafCount+1), 0), params.AGNT2BaseGas},
 		// Length-grief regression — multi-specialist confirmed during /review.
-		// Caller declares stepCount=1000 but supplies only the 5-byte header.
+		// Caller declares stepCount=1000 but supplies only the header.
 		// Pre-fix: billed 21000 + 1000*2000 = 2_021_000 gas while Run() rejects
 		// in microseconds. Post-fix: base gas only.
-		{"length-grief: stepCount=1000, 5-byte body", makeInput(0x00, 1000, 0), params.AGNT2BaseGas},
+		{"length-grief: stepCount=1000, short body", makeInput(0x00, 1000, 0), params.AGNT2BaseGas},
 		{"length-grief: stepCount=1, 159-byte body (short)", makeInput(0x00, 1, 159), params.AGNT2BaseGas},
 		{"length-grief: stepCount=1, 161-byte body (long)", makeInput(0x00, 1, 161), params.AGNT2BaseGas},
 	}
@@ -236,6 +323,9 @@ func TestRevertCodeValues(t *testing.T) {
 	}
 	if revertNotImplemented != 0x05 {
 		t.Errorf("revertNotImplemented = 0x%02x, want 0x05", revertNotImplemented)
+	}
+	if revertWorkflowIDInvalid != 0x06 {
+		t.Errorf("revertWorkflowIDInvalid = 0x%02x, want 0x06", revertWorkflowIDInvalid)
 	}
 }
 
