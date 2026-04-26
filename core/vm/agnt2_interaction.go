@@ -147,12 +147,25 @@ func validateAndBuildMMR(input []byte, stepCount uint64, abiHeaderSize uint64, w
 		var leafHash [32]byte
 		copy(leafHash[:], crypto.Keccak256(leafBytes))
 		mmr.append(leafHash)
+
+		// Phase 7 — emit per-step event
+		var workflowIDHash, payout [32]byte
+		copy(workflowIDHash[:], leafBytes[0:32])
+		copy(payout[:], leafBytes[96:128])
+		globalAgnt2EventStore.append(LeafEvent{
+			WorkflowIDHash: workflowIDHash,
+			StepIndex:      uint32(i),
+			LeafHash:       leafHash,
+			Payout:         payout,
+		})
+
 		prevHash = leafHash
 	}
 	return mmr.getRoot(), 0
 }
 
 func (c *agnt2Interaction) Run(input []byte) ([]byte, error) {
+	globalAgnt2EventStore.reset()
 	if len(input) < 5 {
 		return []byte{revertMalformedCalldata}, ErrAGNT2Reverted
 	}

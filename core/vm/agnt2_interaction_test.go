@@ -952,3 +952,130 @@ func TestRootHook_ScaffoldOnly_NotBlockSafe(t *testing.T) {
 		t.Fatalf("expected current root to equal rootB; scaffold semantic broken")
 	}
 }
+
+// --- Phase 7 Leaf Events Tests ---
+
+func TestLeafEvents_OneStepEmission(t *testing.T) {
+	c := &agnt2Interaction{}
+	wfID := "test-event-1"
+	expectedHash := crypto.Keccak256([]byte(wfID))
+	leaves := makeChainedLeaves(expectedHash, 1)
+
+	// Payout is set to 1 in low byte by makeChainedLeaves
+
+	input := makeInputWithLeaves(wfID, leaves)
+	if _, err := c.Run(input); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	events := LastEmittedEvents()
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+
+	e := events[0]
+	if e.StepIndex != 0 {
+		t.Fatalf("expected StepIndex 0, got %d", e.StepIndex)
+	}
+	var expectedWfHash [32]byte
+	copy(expectedWfHash[:], expectedHash)
+	if e.WorkflowIDHash != expectedWfHash {
+		t.Fatalf("WorkflowIDHash mismatch")
+	}
+
+	var expectedLeafHash [32]byte
+	copy(expectedLeafHash[:], crypto.Keccak256(leaves))
+	if e.LeafHash != expectedLeafHash {
+		t.Fatalf("LeafHash mismatch")
+	}
+
+	if e.Payout[31] != 1 {
+		t.Fatalf("Payout mismatch, expected 1 in low byte, got %d", e.Payout[31])
+	}
+}
+
+func TestLeafEvents_ThreeStepOrder(t *testing.T) {
+	c := &agnt2Interaction{}
+	wfID := "test-event-3"
+	expectedHash := crypto.Keccak256([]byte(wfID))
+	leaves := makeChainedLeaves(expectedHash, 3)
+
+	input := makeInputWithLeaves(wfID, leaves)
+	if _, err := c.Run(input); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	events := LastEmittedEvents()
+	if len(events) != 3 {
+		t.Fatalf("expected 3 events, got %d", len(events))
+	}
+
+	for i, e := range events {
+		if e.StepIndex != uint32(i) {
+			t.Fatalf("expected StepIndex %d, got %d", i, e.StepIndex)
+		}
+	}
+}
+
+func TestLeafEvents_StoreResetOnFailure(t *testing.T) {
+	c := &agnt2Interaction{}
+	wfID := "test-event-reset"
+	expectedHash := crypto.Keccak256([]byte(wfID))
+	leaves := makeChainedLeaves(expectedHash, 3)
+
+	input := makeInputWithLeaves(wfID, leaves)
+	if _, err := c.Run(input); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	events := LastEmittedEvents()
+	if len(events) != 3 {
+		t.Fatalf("expected 3 events before failure, got %d", len(events))
+	}
+
+	// Submit malformed call (bad version)
+	badInput := makeInput(0x01, 1000, 160000)
+	c.Run(badInput)
+
+	eventsAfter := LastEmittedEvents()
+	if len(eventsAfter) != 0 {
+		t.Fatalf("expected 0 events after failed run, got %d", len(eventsAfter))
+	}
+}
+
+func TestLeafEvents_FailedRunHasPartialOrEmpty(t *testing.T) {
+	c := &agnt2Interaction{}
+	wfID := "test-event-partial"
+	expectedHash := crypto.Keccak256([]byte(wfID))
+	leaves := makeChainedLeaves(expectedHash, 3)
+
+	// Corrupt leaf 1's prevLeafHash to break chain at step 1
+	leaves[160+160-1] = 0xFF
+
+	input := makeInputWithLeaves(wfID, leaves)
+	_, err := c.Run(input)
+	if !errors.Is(err, ErrAGNT2Reverted) {
+		t.Fatalf("expected ErrAGNT2Reverted, got %v", err)
+	}
+
+	events := LastEmittedEvents()
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event before chain break, got %d", len(events))
+	}
+	if events[0].StepIndex != 0 {
+		t.Fatalf("expected event for StepIndex 0, got %d", events[0].StepIndex)
+	}
+}
+
+func TestLeafEvents_StepCountZero_NoEvents(t *testing.T) {
+	c := &agnt2Interaction{}
+	input := makeInput(0x00, 0, 0)
+	if _, err := c.Run(input); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	events := LastEmittedEvents()
+	if len(events) != 0 {
+		t.Fatalf("expected 0 events for zero steps, got %d", len(events))
+	}
+}
