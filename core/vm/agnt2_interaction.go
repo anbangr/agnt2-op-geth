@@ -191,7 +191,7 @@ func (c *agnt2Interaction) Run(input []byte) ([]byte, error) {
 		return []byte{errCode}, ErrAGNT2Reverted
 	}
 	// Phase 6 — publish root via native hook for op-node consumption.
-	GlobalAgnt2RootStore.put(root)
+	globalAgnt2RootStore.put(root)
 
 	return nil, nil
 }

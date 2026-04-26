@@ -4,6 +4,28 @@ import (
 	"sync"
 )
 
+// WARNING — Week 10 scaffold: NOT BLOCK-SAFE.
+//
+// This store holds only the most-recent root computed by Run(). It is
+// thread-safe (sync.RWMutex) but NOT block-safe: parallel validation of
+// blocks A and B can publish B's root before A's consumer reads it. The
+// mutex prevents data races, not block confusion.
+//
+// Acceptable use cases for Week 10:
+//   - Single-block integration tests (test/op-node integration with one
+//     block per test).
+//   - Sequential local devnet runs (op-node consumes the root immediately
+//     after the precompile call within the same block proposal).
+//
+// FORBIDDEN use cases until Week 11:
+//   - Production block validation under any concurrency.
+//   - Any code that assumes "I just got a root" implies "the root for the
+//     block I am validating" — those are NOT the same in this scaffold.
+//
+// Week 11 will replace this singleton with a per-block context-scoped
+// store that binds the root to (blockNumber, txIndex) so parallel
+// validation is safe.
+
 // agnt2RootStore holds the most recent AGNT2 interaction MMR root computed
 // by the precompile at 0x0BC2. This is a Week 10 scaffold of the native root
 // output hook (ADR 002 §Week-10-Scope item 5) that op-node will eventually
@@ -36,10 +58,9 @@ func (s *agnt2RootStore) put(root [32]byte) {
 	s.set = true
 }
 
-// GlobalAgnt2RootStore is the package-level singleton consumed by op-node.
-// Exported (capitalized) so op-node can import it once the precompile is
-// registered in Week 10/11 integration.
-var GlobalAgnt2RootStore = &agnt2RootStore{}
+// globalAgnt2RootStore is the package-level singleton consumed by op-node.
+// Unexported so external packages can no longer reassign or nil the singleton.
+var globalAgnt2RootStore = &agnt2RootStore{}
 
 // GetInteractionRoot returns the most recent AGNT2 MMR root and a "set" flag.
 // If set is false, no precompile call has succeeded yet (block header should
@@ -47,6 +68,8 @@ var GlobalAgnt2RootStore = &agnt2RootStore{}
 //
 // Week 10 scope: returns the root from the most recent successful Run(). Week
 // 11 will replace this with a per-block trie read.
+//
+// NOT block-safe; see WARNING at top of file.
 func GetInteractionRoot() ([32]byte, bool) {
-	return GlobalAgnt2RootStore.get()
+	return globalAgnt2RootStore.get()
 }
