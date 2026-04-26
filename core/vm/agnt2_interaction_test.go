@@ -427,7 +427,7 @@ func TestRun_WorkflowBindingMismatch_MiddleLeaf(t *testing.T) {
 	}
 }
 
-func TestRequiredGas_WorkflowBindingMismatch_BaseOnly(t *testing.T) {
+func TestRequiredGas_BindingMismatch_FullStepGas(t *testing.T) {
 	c := &agnt2Interaction{}
 	wfID := "test-wf-001"
 	wrongHash := crypto.Keccak256([]byte("test-wf-002"))
@@ -437,10 +437,10 @@ func TestRequiredGas_WorkflowBindingMismatch_BaseOnly(t *testing.T) {
 	}
 	input := makeInputWithLeaves(wfID, leaves)
 
-	// Phase 5 gas check: we expect only base gas, not step gas.
 	gas := c.RequiredGas(input)
-	if gas != params.AGNT2BaseGas {
-		t.Fatalf("RequiredGas charged %d (> base %d) for binding mismatch", gas, params.AGNT2BaseGas)
+	expectedGas := params.AGNT2BaseGas + 100*params.AGNT2PerStepGas
+	if gas != expectedGas {
+		t.Fatalf("RequiredGas: want %d (full step gas — binding mismatch is semantic, not syntactic), got %d", expectedGas, gas)
 	}
 }
 
@@ -638,16 +638,6 @@ func TestMaxSafeLeafCount_Bounds(t *testing.T) {
 
 // --- MMR Phase 5 Tests ---
 
-func computeMMRRoot(leaves [][]byte) [32]byte {
-	m := &agnt2MMR{}
-	for _, l := range leaves {
-		var h [32]byte
-		copy(h[:], crypto.Keccak256(l))
-		m.append(h)
-	}
-	return m.getRoot()
-}
-
 func makeCanonicalChain(workflowID string, steps []struct {
 	stepID, agentRole string
 	payout            uint64
@@ -688,19 +678,28 @@ func TestRun_MMRRoot_v1_3step(t *testing.T) {
 		flat = append(flat, l...)
 	}
 
-	c := &agnt2Interaction{}
-	out, err := c.Run(makeInputWithLeaves(wfID, flat))
-	if err != nil || out != nil {
-		t.Fatalf("expected success, got err=%v, out=%v", err, out)
-	}
+	input := makeInputWithLeaves(wfID, flat)
+	// Re-derive stepCount, abiHeaderSize, workflowID for the helper call
+	stepCount := uint64(binary.BigEndian.Uint32(input[1:5]))
+	workflowIDParsed, abiHeaderSize, _ := parseWorkflowID(input)
 
-	root := computeMMRRoot(leavesBytes)
+	root, errCode := validateAndBuildMMR(input, stepCount, abiHeaderSize, workflowIDParsed)
+	if errCode != 0 {
+		t.Fatalf("validateAndBuildMMR returned error byte 0x%02x", errCode)
+	}
 	expectedBytes, _ := hex.DecodeString("d54c19717603e20fbf82ff44e90eafd7d1ad14ef4d7811f8802cc3c078cc86c3")
 	var expected [32]byte
 	copy(expected[:], expectedBytes)
 
 	if !bytes.Equal(root[:], expected[:]) {
 		t.Fatalf("v1_3step MMR root mismatch: want %x, got %x", expected, root)
+	}
+
+	// Also verify Run accepts the calldata cleanly (regression check)
+	c := &agnt2Interaction{}
+	out, err := c.Run(input)
+	if err != nil || out != nil {
+		t.Fatalf("Run rejected canonical v1_3step calldata: out=%v err=%v", out, err)
 	}
 }
 
@@ -722,19 +721,28 @@ func TestRun_MMRRoot_v4_5step(t *testing.T) {
 		flat = append(flat, l...)
 	}
 
-	c := &agnt2Interaction{}
-	out, err := c.Run(makeInputWithLeaves(wfID, flat))
-	if err != nil || out != nil {
-		t.Fatalf("expected success, got err=%v, out=%v", err, out)
-	}
+	input := makeInputWithLeaves(wfID, flat)
+	// Re-derive stepCount, abiHeaderSize, workflowID for the helper call
+	stepCount := uint64(binary.BigEndian.Uint32(input[1:5]))
+	workflowIDParsed, abiHeaderSize, _ := parseWorkflowID(input)
 
-	root := computeMMRRoot(leavesBytes)
+	root, errCode := validateAndBuildMMR(input, stepCount, abiHeaderSize, workflowIDParsed)
+	if errCode != 0 {
+		t.Fatalf("validateAndBuildMMR returned error byte 0x%02x", errCode)
+	}
 	expectedBytes, _ := hex.DecodeString("e34cda67eaf574138a02ab6ea87fd1ec55f8e3c09545f2c7c44edb8365316c91")
 	var expected [32]byte
 	copy(expected[:], expectedBytes)
 
 	if !bytes.Equal(root[:], expected[:]) {
 		t.Fatalf("v4_5step MMR root mismatch: want %x, got %x", expected, root)
+	}
+
+	// Also verify Run accepts the calldata cleanly (regression check)
+	c := &agnt2Interaction{}
+	out, err := c.Run(input)
+	if err != nil || out != nil {
+		t.Fatalf("Run rejected canonical v4_5step calldata: out=%v err=%v", out, err)
 	}
 }
 

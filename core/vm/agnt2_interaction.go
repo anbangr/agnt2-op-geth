@@ -96,11 +96,7 @@ type agnt2Interaction struct{}
 // This closes the gas-grief vector where a caller submits valid version and
 // valid stepCount but truncated body — the EVM previously billed
 // stepCount * agnt2PerStepGas before Run() rejected with revertMalformedCalldata
-// in microseconds. Now: if Run() returns a revert code, RequiredGas returns
-// only base gas. Codex+Security multi-specialist confirmed during /review.
-//
-// Week 10 Phase 5 scope: stepCount > 0 charges base + stepCount*per_step
-// for valid inputs.
+// in microseconds. Cheap syntactic checks only. Binding (Phase 3) and chain (Phase 4) checks are NOT mirrored — those are O(stepCount*keccak) and would make gas estimation expensive. Calls that pass syntactic checks but fail binding/chain in Run pay full declared step gas.
 func (c *agnt2Interaction) RequiredGas(input []byte) uint64 {
 	if len(input) < 5 {
 		return params.AGNT2BaseGas
@@ -112,7 +108,7 @@ func (c *agnt2Interaction) RequiredGas(input []byte) uint64 {
 	if stepCount > maxSafeLeafCount {
 		return params.AGNT2BaseGas
 	}
-	workflowID, abiHeaderSize, errCode := parseWorkflowID(input)
+	_, abiHeaderSize, errCode := parseWorkflowID(input)
 	if errCode != 0 {
 		return params.AGNT2BaseGas
 	}
@@ -122,24 +118,38 @@ func (c *agnt2Interaction) RequiredGas(input []byte) uint64 {
 		return params.AGNT2BaseGas
 	}
 
-	if stepCount > 0 {
-		expectedWfHash := crypto.Keccak256(workflowID)
-		leavesStart := uint64(5) + abiHeaderSize
-		var prevHash [32]byte
-		for i := uint64(0); i < stepCount; i++ {
-			leafStart := leavesStart + i*agnt2LeafSize
-			leafBytes := input[leafStart : leafStart+agnt2LeafSize]
-			if !bytes.Equal(leafBytes[0:32], expectedWfHash) {
-				return params.AGNT2BaseGas
-			}
-			if !bytes.Equal(leafBytes[128:160], prevHash[:]) {
-				return params.AGNT2BaseGas
-			}
-			copy(prevHash[:], crypto.Keccak256(leafBytes))
-		}
-	}
-
 	return params.AGNT2BaseGas + stepCount*params.AGNT2PerStepGas
+}
+
+// validateAndBuildMMR validates the per-leaf binding + chain invariants and
+// builds the MMR for the call's leaves. Returns the MMR root and any revert
+// byte (0 = ok). Used by Run and exposed to tests so they can assert the
+// root matches canonical encoding vectors.
+func validateAndBuildMMR(input []byte, stepCount uint64, abiHeaderSize uint64, workflowID []byte) ([32]byte, byte) {
+	if stepCount == 0 {
+		// empty MMR
+		m := &agnt2MMR{}
+		return m.getRoot(), 0
+	}
+	expectedWfHash := crypto.Keccak256(workflowID)
+	leavesStart := uint64(5) + abiHeaderSize
+	var prevHash [32]byte
+	mmr := &agnt2MMR{}
+	for i := uint64(0); i < stepCount; i++ {
+		leafStart := leavesStart + i*agnt2LeafSize
+		leafBytes := input[leafStart : leafStart+agnt2LeafSize]
+		if !bytes.Equal(leafBytes[0:32], expectedWfHash) {
+			return [32]byte{}, revertWorkflowBindingMismatch
+		}
+		if !bytes.Equal(leafBytes[128:160], prevHash[:]) {
+			return [32]byte{}, revertLeafChainBroken
+		}
+		var leafHash [32]byte
+		copy(leafHash[:], crypto.Keccak256(leafBytes))
+		mmr.append(leafHash)
+		prevHash = leafHash
+	}
+	return mmr.getRoot(), 0
 }
 
 func (c *agnt2Interaction) Run(input []byte) ([]byte, error) {
@@ -176,38 +186,11 @@ func (c *agnt2Interaction) Run(input []byte) ([]byte, error) {
 		return []byte{revertMalformedCalldata}, ErrAGNT2Reverted
 	}
 
-	// Phases 3 + 4 + 5 — Per-leaf validation + MMR shadow-copy commit.
-	mmr := &agnt2MMR{}
-	if stepCount > 0 {
-		expectedWfHash := crypto.Keccak256(workflowID)
-		leavesStart := uint64(5) + abiHeaderSize
-		var prevHash [32]byte
-		for i := uint64(0); i < stepCount; i++ {
-			leafStart := leavesStart + i*agnt2LeafSize
-			leafBytes := input[leafStart : leafStart+agnt2LeafSize]
-			// Phase 3 — workflow binding
-			if !bytes.Equal(leafBytes[0:32], expectedWfHash) {
-				return []byte{revertWorkflowBindingMismatch}, ErrAGNT2Reverted
-			}
-			// Phase 4 — prevLeafHash chain
-			if !bytes.Equal(leafBytes[128:160], prevHash[:]) {
-				return []byte{revertLeafChainBroken}, ErrAGNT2Reverted
-			}
-			// Compute leafHash and append to MMR + chain anchor for next iter
-			var leafHash [32]byte
-			copy(leafHash[:], crypto.Keccak256(leafBytes))
-			mmr.append(leafHash)
-			prevHash = leafHash
-		}
+	root, errCode := validateAndBuildMMR(input, stepCount, abiHeaderSize, workflowID)
+	if errCode != 0 {
+		return []byte{errCode}, ErrAGNT2Reverted
 	}
-
-	// Phase 5 — MMR shadow-copy commit.
-	// The root is computed for this call's leaves but not yet persisted across
-	// blocks (Week 11). Phase 6 will expose this root via a native hook for
-	// op-node consumption. For now: validation completes, no silent success
-	// because actual MMR state was built (the user's f5360e30 trust-boundary
-	// concern is closed).
-	_ = mmr.getRoot() // root computed; Phase 6 wires the hook
+	_ = root // Phase 6 will wire the native hook here
 
 	return nil, nil
 }
