@@ -58,6 +58,17 @@ func (s *agnt2RootStore) put(root [32]byte) {
 	s.set = true
 }
 
+// reset is used only for test isolation (called via t.Cleanup); production
+// Run() never calls it. Required because globalAgnt2RootStore is package-
+// level state and successful runs persist their root across tests.
+func (s *agnt2RootStore) reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var zero [32]byte
+	s.root = zero
+	s.set = false
+}
+
 // globalAgnt2RootStore is the package-level singleton consumed by op-node.
 // Unexported so external packages can no longer reassign or nil the singleton.
 var globalAgnt2RootStore = &agnt2RootStore{}

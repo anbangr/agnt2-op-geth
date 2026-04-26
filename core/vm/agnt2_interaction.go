@@ -5,9 +5,34 @@ import (
 	"encoding/binary"
 	"errors"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/params"
 )
+
+// AGNT2InteractionPrecompileAddress is the EVM address that dispatches to
+// agnt2Interaction.Run. Locked by ADR 002 §Calldata Format. Registered into
+// the active Optimism precompile sets via init() below — every binary built
+// from this fork dispatches 0x0BC2 to the AGNT2 precompile regardless of
+// which Optimism fork-tag the chain rules report (Isthmus or Jovian),
+// because AGNT2 is a fork of those Optimism stacks, not a separate
+// timestamp-gated activation.
+var AGNT2InteractionPrecompileAddress = common.BytesToAddress([]byte{0x0B, 0xC2})
+
+// init registers the AGNT2 interaction precompile into the active Optimism
+// precompile dispatch tables. Mutating the maps here (instead of editing
+// the table literals in contracts.go) keeps the AGNT2 fork's diff surface
+// small and trivially survives upstream merges that touch contracts.go.
+//
+// Both Isthmus and Jovian get the registration so AGNT2 chains rolling
+// either fork-tag dispatch correctly. Pre-Isthmus tables (Granite, Fjord,
+// etc.) are intentionally untouched: AGNT2 requires the Isthmus-or-later
+// withdrawal-root semantics to wire the interaction-root field cleanly in
+// Week 11 Phase 7.
+func init() {
+	PrecompiledContractsIsthmus[AGNT2InteractionPrecompileAddress] = &agnt2Interaction{}
+	PrecompiledContractsJovian[AGNT2InteractionPrecompileAddress] = &agnt2Interaction{}
+}
 
 // ErrAGNT2Reverted is the sentinel returned alongside a one-byte error code.
 // Per ADR 002 the EVM must treat failures as transaction reverts with the byte
@@ -89,6 +114,9 @@ func parseWorkflowID(input []byte) ([]byte, uint64, byte) {
 }
 
 type agnt2Interaction struct{}
+
+// Name implements vm.PrecompiledContract for tracing/registry purposes.
+func (c *agnt2Interaction) Name() string { return "agnt2-interaction" }
 
 // RequiredGas mirrors Run()'s validation cheaply. It charges only base gas
 // when input is malformed, the version byte is wrong, stepCount would trip
