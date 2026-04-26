@@ -64,9 +64,13 @@ const (
 	// agnt2LeafSize can't silently shift the bound and mask a regression in
 	// TestMaxSafeLeafCount_Bounds. /review re-iteration flagged the prior
 	// derivation as brittle to constant edits.
-	// As of Week 11 Phase 3, this is now defense-in-depth BELOW the operational
-	// cap params.AGNT2MaxStepsPerCall = 10_000. The operational cap is the tighter
-	// bound; this wrap protector is the unreachable lower-level guard.
+	// As of Week 11 Phase 3, this is defense-in-depth ABOVE the operational cap
+	// params.AGNT2MaxStepsPerCall = 10_000. Numerically: 26_843_545 > 10_000.
+	// The operational cap is the tighter (smaller) bound that fires first in
+	// both Run and RequiredGas; this wrap protector is the unreachable upper
+	// bound, kept so a future bump to AGNT2MaxStepsPerCall that lifts it past
+	// 26_843_545 can't silently disable the uint32-fit invariant — the
+	// ordering check in TestStepCountCaps_Bounds fires first.
 	maxSafeLeafCount uint64 = 26_843_545
 	maxWorkflowIDLen        = 1024
 )
