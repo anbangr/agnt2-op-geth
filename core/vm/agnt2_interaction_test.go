@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/params"
 	"sync"
@@ -1112,10 +1113,11 @@ func TestLeafEvents_StepCountZero_NoEvents(t *testing.T) {
 	}
 }
 
-// TestLeafEvents_Concurrency runs N successful Run() calls in parallel and
-// asserts the store ends with a valid snapshot from one of them (length
-// matches the concurrent stepCount). The race detector + commit() critical
-// section should prevent torn writes.
+// TestLeafEvents_Concurrency runs N successful Run() calls in parallel
+// where each goroutine uses a distinct wfID. The final snapshot must
+// contain stepCount events all bound to a single wfID — proving the
+// commit() replace-in-place is atomic and the snapshot is not a torn
+// mix from multiple commits. Race detector also checks read/write races.
 func TestLeafEvents_Concurrency(t *testing.T) {
 	t.Cleanup(globalAgnt2EventStore.reset)
 	globalAgnt2EventStore.reset()
@@ -1126,10 +1128,11 @@ func TestLeafEvents_Concurrency(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(goroutines)
 	for g := 0; g < goroutines; g++ {
+		g := g
 		go func() {
 			defer wg.Done()
 			c := &agnt2Interaction{}
-			wfID := "test-event-conc"
+			wfID := fmt.Sprintf("test-event-conc-%d", g)
 			expectedHash := crypto.Keccak256([]byte(wfID))
 			leaves := makeChainedLeaves(expectedHash, stepCount)
 			if _, err := c.Run(makeInputWithLeaves(wfID, leaves)); err != nil {
@@ -1143,9 +1146,15 @@ func TestLeafEvents_Concurrency(t *testing.T) {
 	if len(events) != stepCount {
 		t.Fatalf("expected store length %d after concurrent commits, got %d", stepCount, len(events))
 	}
+	// All events in the final snapshot must share the same WorkflowIDHash
+	// (the winning writer) — a torn commit would mix two writers' events.
+	winnerHash := events[0].WorkflowIDHash
 	for i, e := range events {
 		if e.StepIndex != uint32(i) {
 			t.Fatalf("event[%d] StepIndex %d (likely torn snapshot)", i, e.StepIndex)
+		}
+		if e.WorkflowIDHash != winnerHash {
+			t.Fatalf("event[%d] WorkflowIDHash differs from event[0] — torn commit detected", i)
 		}
 	}
 }

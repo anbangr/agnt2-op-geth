@@ -46,9 +46,9 @@ func (s *agnt2EventStore) commit(events []LeafEvent) {
 	s.events = append(s.events[:0], events...)
 }
 
-// reset is exported only for test isolation; production Run() never calls
-// it. Required because globalAgnt2EventStore is package-level state and
-// commit-on-success preserves prior events across calls.
+// reset is used only for test isolation (called via t.Cleanup); production
+// Run() never calls it. Required because globalAgnt2EventStore is package-
+// level state and commit-on-success preserves prior events across calls.
 func (s *agnt2EventStore) reset() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
