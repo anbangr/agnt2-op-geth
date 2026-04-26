@@ -483,31 +483,64 @@ func TestRun_RevertCodes(t *testing.T) {
 	}
 }
 
-func TestRun_StepOverflow(t *testing.T) {
+// TestRun_StepOverflow_OperationalCap exercises the Phase 3 operational cap
+// (params.AGNT2MaxStepsPerCall = 10_000). stepCount = cap + 1 must revert
+// with revertStepOverflow (0x03) — the same byte the wrap protector uses,
+// because on-chain decoders need not distinguish operational vs wrap rejection.
+func TestRun_StepOverflow_OperationalCap(t *testing.T) {
 	c := &agnt2Interaction{}
-	overflow := uint32(maxSafeLeafCount + 1)
+	overflow := uint32(params.AGNT2MaxStepsPerCall + 1)
 	input := makeInput(0x00, overflow, 0)
 	out, err := c.Run(input)
-	if !errors.Is(err, ErrExecutionReverted) {
-		t.Fatalf("expected ErrExecutionReverted; got %v", err)
+	if err != ErrExecutionReverted {
+		t.Fatalf("expected ErrExecutionReverted (direct ==); got %v", err)
 	}
 	if len(out) != 1 || out[0] != revertStepOverflow {
 		t.Fatalf("expected revertStepOverflow; got 0x%02x", out[0])
 	}
 }
 
-func TestRun_BoundaryAtMaxSafeLeafCount(t *testing.T) {
+// TestRun_StepOverflow_WrapProtector_Unreachable documents that the wrap
+// protector (maxSafeLeafCount = 26_843_545) is logically dead under the
+// operational cap (10_000 < 26M). Pinning the unreachable check here so
+// future edits to AGNT2MaxStepsPerCall that lift it above maxSafeLeafCount
+// don't silently disable the wrap protector. Sending stepCount = wrap+1
+// still gets caught — but by the operational cap first; we observe the
+// same revert byte either way.
+func TestRun_StepOverflow_WrapProtector_Unreachable(t *testing.T) {
 	c := &agnt2Interaction{}
-	// stepCount = maxSafeLeafCount must NOT trigger STEP_OVERFLOW. Sending only
-	// the header surfaces MALFORMED instead. Confirms `> max` not `>= max`.
-	atMax := uint32(maxSafeLeafCount)
-	input := makeInput(0x00, atMax, 0)
+	beyond := uint32(maxSafeLeafCount + 1) // > both caps
+	input := makeInput(0x00, beyond, 0)
 	out, err := c.Run(input)
-	if !errors.Is(err, ErrExecutionReverted) {
-		t.Fatalf("expected ErrExecutionReverted; got %v", err)
+	if err != ErrExecutionReverted {
+		t.Fatalf("expected ErrExecutionReverted (direct ==); got %v", err)
+	}
+	if len(out) != 1 || out[0] != revertStepOverflow {
+		t.Fatalf("expected revertStepOverflow; got 0x%02x", out[0])
+	}
+	// Defense-in-depth invariant: operational cap must be < wrap protector.
+	if params.AGNT2MaxStepsPerCall >= maxSafeLeafCount {
+		t.Fatalf("operational cap (%d) must be strictly less than wrap protector (%d)",
+			params.AGNT2MaxStepsPerCall, maxSafeLeafCount)
+	}
+}
+
+// TestRun_BoundaryAtMaxStepsPerCall pins the inclusive boundary of the Phase 3
+// operational cap. stepCount = AGNT2MaxStepsPerCall must NOT trigger
+// STEP_OVERFLOW (the comparison is `>`, not `>=`). Sending only the header
+// surfaces MALFORMED instead — same semantic as the prior wrap-protector
+// boundary test, but now anchored at the operational cap (10_000) instead
+// of the unreachable wrap protector (26_843_545).
+func TestRun_BoundaryAtMaxStepsPerCall(t *testing.T) {
+	c := &agnt2Interaction{}
+	atCap := uint32(params.AGNT2MaxStepsPerCall)
+	input := makeInput(0x00, atCap, 0)
+	out, err := c.Run(input)
+	if err != ErrExecutionReverted {
+		t.Fatalf("expected ErrExecutionReverted (direct ==); got %v", err)
 	}
 	if len(out) != 1 || out[0] != revertMalformedCalldata {
-		t.Fatalf("at maxSafeLeafCount, expected revertMalformedCalldata; got 0x%02x", out[0])
+		t.Fatalf("at AGNT2MaxStepsPerCall, expected revertMalformedCalldata; got 0x%02x", out[0])
 	}
 }
 
@@ -524,7 +557,8 @@ func TestRequiredGas(t *testing.T) {
 		{"valid 0 steps", makeInput(0x00, 0, 0), params.AGNT2BaseGas},
 		{"valid 1 step", makeInputWithLeaves("test-wf", makeChainedLeaves(crypto.Keccak256([]byte("test-wf")), 1)), params.AGNT2BaseGas + 1*params.AGNT2PerStepGas},
 		{"valid 100 steps", makeInputWithLeaves("test-wf", makeChainedLeaves(crypto.Keccak256([]byte("test-wf")), 100)), params.AGNT2BaseGas + 100*params.AGNT2PerStepGas},
-		{"overflow stepCount -> base only", makeInput(0x00, uint32(maxSafeLeafCount+1), 0), params.AGNT2BaseGas},
+		{"operational-cap exceeded -> base only", makeInput(0x00, uint32(params.AGNT2MaxStepsPerCall+1), 0), params.AGNT2BaseGas},
+		{"wrap-protector exceeded -> base only", makeInput(0x00, uint32(maxSafeLeafCount+1), 0), params.AGNT2BaseGas},
 		// Length-grief regression — multi-specialist confirmed during /review.
 		// Caller declares stepCount=1000 but supplies only the header.
 		// Pre-fix: billed 21000 + 1000*2000 = 2_021_000 gas while Run() rejects
@@ -552,7 +586,8 @@ func TestRequiredGas_Run_NoOvercharge(t *testing.T) {
 		{},
 		{0x00, 0x00, 0x00, 0x00},      // < 5 bytes
 		makeInput(0x01, 1000, 160000), // bad version
-		makeInput(0x00, uint32(maxSafeLeafCount+1), 0), // overflow
+		makeInput(0x00, uint32(params.AGNT2MaxStepsPerCall+1), 0), // operational cap exceeded
+		makeInput(0x00, uint32(maxSafeLeafCount+1), 0),            // wrap protector exceeded
 		makeInput(0x00, 1000, 0),                       // length-grief: declared 1000 steps, no body
 		makeInput(0x00, 1, 159),                        // length-grief: short body
 		makeInput(0x00, 1, 161),                        // length-grief: long body (trailing)
@@ -626,11 +661,18 @@ func TestRevertCodeValues(t *testing.T) {
 	}
 }
 
-// Boundary sanity: maxSafeLeafCount * agnt2LeafSize must fit in uint32
-// without wrap, and (maxSafeLeafCount + 1) * agnt2LeafSize must wrap.
-// Also pins the literal value (26_843_545) so a future edit to agnt2LeafSize
-// can't silently shift the bound. /review re-iteration 2026-04-26.
-func TestMaxSafeLeafCount_Bounds(t *testing.T) {
+// TestStepCountCaps_Bounds pins the literal values of both step-count caps:
+// (a) maxSafeLeafCount = 26_843_545 — uint32-overflow wrap protector
+// (b) params.AGNT2MaxStepsPerCall = 10_000 — operational cap (Week 11 Phase 3)
+//
+// Invariants:
+//   - Wrap protector must continue to satisfy the uint32 fit (load-bearing
+//     for 32-bit Go builds).
+//   - Operational cap must be strictly LESS than the wrap protector — if
+//     these are ever inverted, the wrap protector becomes reachable and the
+//     defense-in-depth ordering in Run/RequiredGas breaks. This is the
+//     guard the Phase 3 plan §"defense-in-depth" comment depends on.
+func TestStepCountCaps_Bounds(t *testing.T) {
 	if maxSafeLeafCount != 26_843_545 {
 		t.Fatalf("maxSafeLeafCount changed: want 26_843_545, got %d", maxSafeLeafCount)
 	}
@@ -639,6 +681,13 @@ func TestMaxSafeLeafCount_Bounds(t *testing.T) {
 	}
 	if (maxSafeLeafCount+1)*agnt2LeafSize <= uint64(^uint32(0)) {
 		t.Fatalf("(maxSafeLeafCount+1)*leafSize must exceed uint32; got %d", (maxSafeLeafCount+1)*agnt2LeafSize)
+	}
+	if params.AGNT2MaxStepsPerCall != 10_000 {
+		t.Fatalf("AGNT2MaxStepsPerCall changed: want 10_000, got %d", params.AGNT2MaxStepsPerCall)
+	}
+	if params.AGNT2MaxStepsPerCall >= maxSafeLeafCount {
+		t.Fatalf("ordering invariant broken: operational cap (%d) must be < wrap protector (%d)",
+			params.AGNT2MaxStepsPerCall, maxSafeLeafCount)
 	}
 }
 
