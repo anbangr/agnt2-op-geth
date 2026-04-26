@@ -683,7 +683,7 @@ func TestRun_MMRRoot_v1_3step(t *testing.T) {
 	stepCount := uint64(binary.BigEndian.Uint32(input[1:5]))
 	workflowIDParsed, abiHeaderSize, _ := parseWorkflowID(input)
 
-	root, errCode := validateAndBuildMMR(input, stepCount, abiHeaderSize, workflowIDParsed)
+	root, _, errCode := validateAndBuildMMR(input, stepCount, abiHeaderSize, workflowIDParsed)
 	if errCode != 0 {
 		t.Fatalf("validateAndBuildMMR returned error byte 0x%02x", errCode)
 	}
@@ -726,7 +726,7 @@ func TestRun_MMRRoot_v4_5step(t *testing.T) {
 	stepCount := uint64(binary.BigEndian.Uint32(input[1:5]))
 	workflowIDParsed, abiHeaderSize, _ := parseWorkflowID(input)
 
-	root, errCode := validateAndBuildMMR(input, stepCount, abiHeaderSize, workflowIDParsed)
+	root, _, errCode := validateAndBuildMMR(input, stepCount, abiHeaderSize, workflowIDParsed)
 	if errCode != 0 {
 		t.Fatalf("validateAndBuildMMR returned error byte 0x%02x", errCode)
 	}
@@ -956,12 +956,13 @@ func TestRootHook_ScaffoldOnly_NotBlockSafe(t *testing.T) {
 // --- Phase 7 Leaf Events Tests ---
 
 func TestLeafEvents_OneStepEmission(t *testing.T) {
+	t.Cleanup(globalAgnt2EventStore.reset)
+	globalAgnt2EventStore.reset()
+
 	c := &agnt2Interaction{}
 	wfID := "test-event-1"
 	expectedHash := crypto.Keccak256([]byte(wfID))
 	leaves := makeChainedLeaves(expectedHash, 1)
-
-	// Payout is set to 1 in low byte by makeChainedLeaves
 
 	input := makeInputWithLeaves(wfID, leaves)
 	if _, err := c.Run(input); err != nil {
@@ -977,24 +978,32 @@ func TestLeafEvents_OneStepEmission(t *testing.T) {
 	if e.StepIndex != 0 {
 		t.Fatalf("expected StepIndex 0, got %d", e.StepIndex)
 	}
-	var expectedWfHash [32]byte
+	var expectedWfHash, expectedStepID, expectedAgentRole, expectedLeafHash [32]byte
 	copy(expectedWfHash[:], expectedHash)
+	copy(expectedStepID[:], leaves[32:64])
+	copy(expectedAgentRole[:], leaves[64:96])
+	copy(expectedLeafHash[:], crypto.Keccak256(leaves))
 	if e.WorkflowIDHash != expectedWfHash {
 		t.Fatalf("WorkflowIDHash mismatch")
 	}
-
-	var expectedLeafHash [32]byte
-	copy(expectedLeafHash[:], crypto.Keccak256(leaves))
+	if e.StepIDHash != expectedStepID {
+		t.Fatalf("StepIDHash mismatch: got %x, want %x", e.StepIDHash, expectedStepID)
+	}
+	if e.AgentRoleHash != expectedAgentRole {
+		t.Fatalf("AgentRoleHash mismatch: got %x, want %x", e.AgentRoleHash, expectedAgentRole)
+	}
 	if e.LeafHash != expectedLeafHash {
 		t.Fatalf("LeafHash mismatch")
 	}
-
 	if e.Payout[31] != 1 {
 		t.Fatalf("Payout mismatch, expected 1 in low byte, got %d", e.Payout[31])
 	}
 }
 
 func TestLeafEvents_ThreeStepOrder(t *testing.T) {
+	t.Cleanup(globalAgnt2EventStore.reset)
+	globalAgnt2EventStore.reset()
+
 	c := &agnt2Interaction{}
 	wfID := "test-event-3"
 	expectedHash := crypto.Keccak256([]byte(wfID))
@@ -1014,38 +1023,61 @@ func TestLeafEvents_ThreeStepOrder(t *testing.T) {
 		if e.StepIndex != uint32(i) {
 			t.Fatalf("expected StepIndex %d, got %d", i, e.StepIndex)
 		}
+		var wantStepID, wantAgentRole [32]byte
+		copy(wantStepID[:], leaves[i*160+32:i*160+64])
+		copy(wantAgentRole[:], leaves[i*160+64:i*160+96])
+		if e.StepIDHash != wantStepID {
+			t.Fatalf("event[%d] StepIDHash mismatch", i)
+		}
+		if e.AgentRoleHash != wantAgentRole {
+			t.Fatalf("event[%d] AgentRoleHash mismatch", i)
+		}
 	}
 }
 
-func TestLeafEvents_StoreResetOnFailure(t *testing.T) {
+// TestLeafEvents_FailedCallPreservesPriorEvents documents the commit-on-success
+// semantic: a successful call commits its events to the singleton; a subsequent
+// failing call MUST leave those events untouched. This mirrors the EVM log
+// journal — a reverted call's logs are dropped, and prior calls' logs remain
+// visible to consumers calling LastEmittedEvents().
+func TestLeafEvents_FailedCallPreservesPriorEvents(t *testing.T) {
+	t.Cleanup(globalAgnt2EventStore.reset)
+	globalAgnt2EventStore.reset()
+
 	c := &agnt2Interaction{}
-	wfID := "test-event-reset"
+	wfID := "test-event-preserve"
 	expectedHash := crypto.Keccak256([]byte(wfID))
 	leaves := makeChainedLeaves(expectedHash, 3)
 
-	input := makeInputWithLeaves(wfID, leaves)
-	if _, err := c.Run(input); err != nil {
-		t.Fatalf("Run failed: %v", err)
+	if _, err := c.Run(makeInputWithLeaves(wfID, leaves)); err != nil {
+		t.Fatalf("first Run failed: %v", err)
+	}
+	if got := len(LastEmittedEvents()); got != 3 {
+		t.Fatalf("expected 3 events after success, got %d", got)
 	}
 
-	events := LastEmittedEvents()
-	if len(events) != 3 {
-		t.Fatalf("expected 3 events before failure, got %d", len(events))
-	}
-
-	// Submit malformed call (bad version)
+	// Submit malformed call (bad version) — must NOT clobber prior events.
 	badInput := makeInput(0x01, 1000, 160000)
-	c.Run(badInput)
+	if _, err := c.Run(badInput); err == nil {
+		t.Fatalf("expected malformed call to revert")
+	}
 
 	eventsAfter := LastEmittedEvents()
-	if len(eventsAfter) != 0 {
-		t.Fatalf("expected 0 events after failed run, got %d", len(eventsAfter))
+	if len(eventsAfter) != 3 {
+		t.Fatalf("commit-on-success violated: expected prior 3 events to persist after failed run, got %d", len(eventsAfter))
 	}
 }
 
-func TestLeafEvents_FailedRunHasPartialOrEmpty(t *testing.T) {
+// TestLeafEvents_FailedRunHasNoEvents covers the inverse: a chain-break
+// mid-loop must NOT leak partial events. validateAndBuildMMR returns nil
+// events on revert and Run() never calls commit, so the singleton's prior
+// state (here: empty) is preserved.
+func TestLeafEvents_FailedRunHasNoEvents(t *testing.T) {
+	t.Cleanup(globalAgnt2EventStore.reset)
+	globalAgnt2EventStore.reset()
+
 	c := &agnt2Interaction{}
-	wfID := "test-event-partial"
+	wfID := "test-event-chainbreak"
 	expectedHash := crypto.Keccak256([]byte(wfID))
 	leaves := makeChainedLeaves(expectedHash, 3)
 
@@ -1059,15 +1091,15 @@ func TestLeafEvents_FailedRunHasPartialOrEmpty(t *testing.T) {
 	}
 
 	events := LastEmittedEvents()
-	if len(events) != 1 {
-		t.Fatalf("expected 1 event before chain break, got %d", len(events))
-	}
-	if events[0].StepIndex != 0 {
-		t.Fatalf("expected event for StepIndex 0, got %d", events[0].StepIndex)
+	if len(events) != 0 {
+		t.Fatalf("expected 0 events after chain-break revert (commit-on-success), got %d", len(events))
 	}
 }
 
 func TestLeafEvents_StepCountZero_NoEvents(t *testing.T) {
+	t.Cleanup(globalAgnt2EventStore.reset)
+	globalAgnt2EventStore.reset()
+
 	c := &agnt2Interaction{}
 	input := makeInput(0x00, 0, 0)
 	if _, err := c.Run(input); err != nil {
@@ -1077,5 +1109,43 @@ func TestLeafEvents_StepCountZero_NoEvents(t *testing.T) {
 	events := LastEmittedEvents()
 	if len(events) != 0 {
 		t.Fatalf("expected 0 events for zero steps, got %d", len(events))
+	}
+}
+
+// TestLeafEvents_Concurrency runs N successful Run() calls in parallel and
+// asserts the store ends with a valid snapshot from one of them (length
+// matches the concurrent stepCount). The race detector + commit() critical
+// section should prevent torn writes.
+func TestLeafEvents_Concurrency(t *testing.T) {
+	t.Cleanup(globalAgnt2EventStore.reset)
+	globalAgnt2EventStore.reset()
+
+	const goroutines = 16
+	const stepCount = 4
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for g := 0; g < goroutines; g++ {
+		go func() {
+			defer wg.Done()
+			c := &agnt2Interaction{}
+			wfID := "test-event-conc"
+			expectedHash := crypto.Keccak256([]byte(wfID))
+			leaves := makeChainedLeaves(expectedHash, stepCount)
+			if _, err := c.Run(makeInputWithLeaves(wfID, leaves)); err != nil {
+				t.Errorf("Run failed: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	events := LastEmittedEvents()
+	if len(events) != stepCount {
+		t.Fatalf("expected store length %d after concurrent commits, got %d", stepCount, len(events))
+	}
+	for i, e := range events {
+		if e.StepIndex != uint32(i) {
+			t.Fatalf("event[%d] StepIndex %d (likely torn snapshot)", i, e.StepIndex)
+		}
 	}
 }

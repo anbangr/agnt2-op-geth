@@ -122,50 +122,58 @@ func (c *agnt2Interaction) RequiredGas(input []byte) uint64 {
 }
 
 // validateAndBuildMMR validates the per-leaf binding + chain invariants and
-// builds the MMR for the call's leaves. Returns the MMR root and any revert
-// byte (0 = ok). Used by Run and exposed to tests so they can assert the
-// root matches canonical encoding vectors.
-func validateAndBuildMMR(input []byte, stepCount uint64, abiHeaderSize uint64, workflowID []byte) ([32]byte, byte) {
+// builds the MMR for the call's leaves. Returns the MMR root, the per-leaf
+// events collected during validation, and any revert byte (0 = ok). The
+// caller is responsible for committing events to globalAgnt2EventStore only
+// on full success — partial events from a reverted call MUST NOT be
+// observable via LastEmittedEvents() (mirrors EVM log journal rollback).
+// Used by Run and exposed to tests so they can assert the root matches
+// canonical encoding vectors.
+func validateAndBuildMMR(input []byte, stepCount uint64, abiHeaderSize uint64, workflowID []byte) ([32]byte, []LeafEvent, byte) {
 	if stepCount == 0 {
 		// empty MMR
 		m := &agnt2MMR{}
-		return m.getRoot(), 0
+		return m.getRoot(), nil, 0
 	}
 	expectedWfHash := crypto.Keccak256(workflowID)
 	leavesStart := uint64(5) + abiHeaderSize
 	var prevHash [32]byte
 	mmr := &agnt2MMR{}
+	events := make([]LeafEvent, 0, stepCount)
 	for i := uint64(0); i < stepCount; i++ {
 		leafStart := leavesStart + i*agnt2LeafSize
 		leafBytes := input[leafStart : leafStart+agnt2LeafSize]
 		if !bytes.Equal(leafBytes[0:32], expectedWfHash) {
-			return [32]byte{}, revertWorkflowBindingMismatch
+			return [32]byte{}, nil, revertWorkflowBindingMismatch
 		}
 		if !bytes.Equal(leafBytes[128:160], prevHash[:]) {
-			return [32]byte{}, revertLeafChainBroken
+			return [32]byte{}, nil, revertLeafChainBroken
 		}
 		var leafHash [32]byte
 		copy(leafHash[:], crypto.Keccak256(leafBytes))
 		mmr.append(leafHash)
 
-		// Phase 7 — emit per-step event
-		var workflowIDHash, payout [32]byte
+		// Phase 7 — collect per-step event for commit-on-success.
+		var workflowIDHash, stepIDHash, agentRoleHash, payout [32]byte
 		copy(workflowIDHash[:], leafBytes[0:32])
+		copy(stepIDHash[:], leafBytes[32:64])
+		copy(agentRoleHash[:], leafBytes[64:96])
 		copy(payout[:], leafBytes[96:128])
-		globalAgnt2EventStore.append(LeafEvent{
+		events = append(events, LeafEvent{
 			WorkflowIDHash: workflowIDHash,
 			StepIndex:      uint32(i),
-			LeafHash:       leafHash,
+			StepIDHash:     stepIDHash,
+			AgentRoleHash:  agentRoleHash,
 			Payout:         payout,
+			LeafHash:       leafHash,
 		})
 
 		prevHash = leafHash
 	}
-	return mmr.getRoot(), 0
+	return mmr.getRoot(), events, 0
 }
 
 func (c *agnt2Interaction) Run(input []byte) ([]byte, error) {
-	globalAgnt2EventStore.reset()
 	if len(input) < 5 {
 		return []byte{revertMalformedCalldata}, ErrAGNT2Reverted
 	}
@@ -199,12 +207,15 @@ func (c *agnt2Interaction) Run(input []byte) ([]byte, error) {
 		return []byte{revertMalformedCalldata}, ErrAGNT2Reverted
 	}
 
-	root, errCode := validateAndBuildMMR(input, stepCount, abiHeaderSize, workflowID)
+	root, events, errCode := validateAndBuildMMR(input, stepCount, abiHeaderSize, workflowID)
 	if errCode != 0 {
 		return []byte{errCode}, ErrAGNT2Reverted
 	}
 	// Phase 6 — publish root via native hook for op-node consumption.
 	globalAgnt2RootStore.put(root)
+	// Phase 7 — commit collected events on success only (mirrors EVM log
+	// journal: a reverted call's logs are dropped; prior call's logs persist).
+	globalAgnt2EventStore.commit(events)
 
 	return nil, nil
 }
