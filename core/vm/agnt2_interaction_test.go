@@ -3,6 +3,7 @@ package vm
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"testing"
 
@@ -100,17 +101,17 @@ func makeChainedLeaves(wfHash []byte, n int) []byte {
 	return result
 }
 
+// TestParseWorkflowID_Valid was asserting 0x05 because Week 9 rejected valid input.
+// Now that Phase 5 is active, valid input succeeds. We simply rename to
+// demonstrate parsing doesn't crash.
 func TestParseWorkflowID_Valid(t *testing.T) {
 	c := &agnt2Interaction{}
 	wfID := "test-wf-001"
 	expectedHash := crypto.Keccak256([]byte(wfID))
 	leaves := makeChainedLeaves(expectedHash, 1)
 	out, err := c.Run(makeInputWithLeaves(wfID, leaves))
-	if !errors.Is(err, ErrAGNT2Reverted) {
-		t.Fatalf("expected ErrAGNT2Reverted, got %v", err)
-	}
-	if len(out) != 1 || out[0] != revertNotImplemented {
-		t.Fatalf("expected 0x05, got %v", out)
+	if err != nil || out != nil {
+		t.Fatalf("expected success, got %v", err)
 	}
 }
 
@@ -246,28 +247,20 @@ func TestRun_SuccessZeroSteps(t *testing.T) {
 	}
 }
 
-// Week 9: stepCount > 0 is intentionally NOT implemented — Run reverts with
-// revertNotImplemented (0x05) until Week 10 wires the MMR writer. This closes
-// the silent-success trust boundary that ADR 002 §Dual-Write Abort forbids.
-// /review re-iteration 2026-04-26 — Claude adversarial subagent finding.
-func TestRun_NotImplementedOneStep(t *testing.T) {
+// Phase 5 MMR wire up: stepCount > 0 now succeeds.
+func TestRun_OneStepSuccess(t *testing.T) {
 	c := &agnt2Interaction{}
 	wfID := "test-wf-001"
 	expectedHash := crypto.Keccak256([]byte(wfID))
 	leaves := makeChainedLeaves(expectedHash, 1)
 	out, err := c.Run(makeInputWithLeaves(wfID, leaves))
-	if !errors.Is(err, ErrAGNT2Reverted) {
-		t.Fatalf("Week 9: one-step call must revert with ErrAGNT2Reverted; got err=%v", err)
-	}
-	if len(out) != 1 || out[0] != revertNotImplemented {
-		t.Fatalf("expected revertNotImplemented (0x%02x); got %v", revertNotImplemented, out)
+	if err != nil || out != nil {
+		t.Fatalf("expected success; got err=%v, out=%v", err, out)
 	}
 }
 
-// Sweep stepCount=1..1000 to confirm Week 9 reverts every well-formed
-// stepCount > 0 case with revertNotImplemented. Once Week 10 wires the writer,
-// flip this test to TestRun_AcceptsAnyValidStepCount.
-func TestRun_NotImplementedSweep(t *testing.T) {
+// Sweep stepCount=1..1000 to confirm Phase 5 accepts valid inputs.
+func TestRun_StepCountSweep_Success(t *testing.T) {
 	c := &agnt2Interaction{}
 	wfID := "test-sweep"
 	expectedHash := crypto.Keccak256([]byte(wfID))
@@ -275,12 +268,8 @@ func TestRun_NotImplementedSweep(t *testing.T) {
 		leaves := makeChainedLeaves(expectedHash, int(stepCount))
 		input := makeInputWithLeaves(wfID, leaves)
 		out, err := c.Run(input)
-		if !errors.Is(err, ErrAGNT2Reverted) {
-			t.Fatalf("stepCount=%d: expected ErrAGNT2Reverted, got err=%v", stepCount, err)
-		}
-		if len(out) != 1 || out[0] != revertNotImplemented {
-			t.Fatalf("stepCount=%d: expected revertNotImplemented (0x%02x), got %v",
-				stepCount, revertNotImplemented, out)
+		if err != nil || out != nil {
+			t.Fatalf("stepCount=%d: expected success, got err=%v, out=%v", stepCount, err, out)
 		}
 	}
 }
@@ -291,11 +280,8 @@ func TestRun_WorkflowBindingValid_OneStep(t *testing.T) {
 	expectedHash := crypto.Keccak256([]byte(wfID))
 	leaves := makeChainedLeaves(expectedHash, 1)
 	out, err := c.Run(makeInputWithLeaves(wfID, leaves))
-	if !errors.Is(err, ErrAGNT2Reverted) {
-		t.Fatalf("expected ErrAGNT2Reverted, got %v", err)
-	}
-	if len(out) != 1 || out[0] != revertNotImplemented {
-		t.Fatalf("expected revertNotImplemented (0x05), got %v", out)
+	if err != nil || out != nil {
+		t.Fatalf("expected success, got %v, %v", err, out)
 	}
 }
 
@@ -305,11 +291,8 @@ func TestRun_WorkflowBindingValid_ThreeStep(t *testing.T) {
 	expectedHash := crypto.Keccak256([]byte(wfID))
 	leaves := makeChainedLeaves(expectedHash, 3)
 	out, err := c.Run(makeInputWithLeaves(wfID, leaves))
-	if !errors.Is(err, ErrAGNT2Reverted) {
-		t.Fatalf("expected ErrAGNT2Reverted, got %v", err)
-	}
-	if len(out) != 1 || out[0] != revertNotImplemented {
-		t.Fatalf("expected revertNotImplemented (0x05), got %v", out)
+	if err != nil || out != nil {
+		t.Fatalf("expected success, got %v, %v", err, out)
 	}
 }
 
@@ -319,11 +302,8 @@ func TestRun_ChainValid_OneStep(t *testing.T) {
 	expectedHash := crypto.Keccak256([]byte(wfID))
 	leaves := makeChainedLeaves(expectedHash, 1)
 	out, err := c.Run(makeInputWithLeaves(wfID, leaves))
-	if !errors.Is(err, ErrAGNT2Reverted) {
-		t.Fatalf("expected ErrAGNT2Reverted, got %v", err)
-	}
-	if len(out) != 1 || out[0] != revertNotImplemented {
-		t.Fatalf("expected revertNotImplemented (0x05), got %v", out)
+	if err != nil || out != nil {
+		t.Fatalf("expected success, got %v, %v", err, out)
 	}
 }
 
@@ -333,11 +313,8 @@ func TestRun_ChainValid_ThreeStep(t *testing.T) {
 	expectedHash := crypto.Keccak256([]byte(wfID))
 	leaves := makeChainedLeaves(expectedHash, 3)
 	out, err := c.Run(makeInputWithLeaves(wfID, leaves))
-	if !errors.Is(err, ErrAGNT2Reverted) {
-		t.Fatalf("expected ErrAGNT2Reverted, got %v", err)
-	}
-	if len(out) != 1 || out[0] != revertNotImplemented {
-		t.Fatalf("expected revertNotImplemented (0x05), got %v", out)
+	if err != nil || out != nil {
+		t.Fatalf("expected success, got %v, %v", err, out)
 	}
 }
 
@@ -539,11 +516,8 @@ func TestRequiredGas(t *testing.T) {
 		{"4 bytes -> base only", []byte{0x00, 0x00, 0x00, 0x00}, params.AGNT2BaseGas},
 		{"bad version -> base only (no step gas)", makeInput(0x01, 1000, 0), params.AGNT2BaseGas},
 		{"valid 0 steps", makeInput(0x00, 0, 0), params.AGNT2BaseGas},
-		// Week 9: stepCount > 0 reverts with revertNotImplemented in Run, so
-		// RequiredGas charges base only. Once Week 10 wires the writer, these
-		// cases flip back to base + N*perStep.
-		{"valid 1 step (Week 9 revert)", makeInput(0x00, 1, 160), params.AGNT2BaseGas},
-		{"valid 100 steps (Week 9 revert)", makeInput(0x00, 100, 16000), params.AGNT2BaseGas},
+		{"valid 1 step", makeInputWithLeaves("test-wf", makeChainedLeaves(crypto.Keccak256([]byte("test-wf")), 1)), params.AGNT2BaseGas + 1*params.AGNT2PerStepGas},
+		{"valid 100 steps", makeInputWithLeaves("test-wf", makeChainedLeaves(crypto.Keccak256([]byte("test-wf")), 100)), params.AGNT2BaseGas + 100*params.AGNT2PerStepGas},
 		{"overflow stepCount -> base only", makeInput(0x00, uint32(maxSafeLeafCount+1), 0), params.AGNT2BaseGas},
 		// Length-grief regression — multi-specialist confirmed during /review.
 		// Caller declares stepCount=1000 but supplies only the header.
@@ -576,10 +550,6 @@ func TestRequiredGas_Run_NoOvercharge(t *testing.T) {
 		makeInput(0x00, 1000, 0),                       // length-grief: declared 1000 steps, no body
 		makeInput(0x00, 1, 159),                        // length-grief: short body
 		makeInput(0x00, 1, 161),                        // length-grief: long body (trailing)
-		// Week 9 trust boundary — well-formed stepCount > 0 reverts with
-		// revertNotImplemented (will flip back to "accepted" in Week 10).
-		makeInput(0x00, 1, 160),
-		makeInput(0x00, 100, 16000),
 	}
 	for _, in := range rejecting {
 		gas := c.RequiredGas(in)
@@ -596,14 +566,18 @@ func TestRequiredGas_Run_NoOvercharge(t *testing.T) {
 // exactly base + stepCount*perStep. The other side of the gas-correctness
 // contract — testing specialist requested this during /review.
 //
-// Week 9: only stepCount == 0 is "accepted" (returns success). All stepCount > 0
-// cases revert (see TestRun_NotImplementedSweep). Week 10 will widen this set
-// once the MMR writer is wired — at which point this test loops over all valid
-// stepCounts.
+// Phase 5: Loops over all valid stepCounts.
 func TestRequiredGas_Run_AcceptanceInvariant(t *testing.T) {
 	c := &agnt2Interaction{}
-	for _, stepCount := range []uint32{0} {
-		input := makeInput(0x00, stepCount, int(stepCount)*int(agnt2LeafSize))
+	wfID := "test-sweep"
+	expectedHash := crypto.Keccak256([]byte(wfID))
+	for _, stepCount := range []uint32{0, 1, 2, 10, 100, 1000} {
+		var input []byte
+		if stepCount == 0 {
+			input = makeInput(0x00, 0, 0)
+		} else {
+			input = makeInputWithLeaves(wfID, makeChainedLeaves(expectedHash, int(stepCount)))
+		}
 		out, err := c.Run(input)
 		if err != nil || out != nil {
 			t.Fatalf("Run rejected stepCount=%d: out=%v err=%v", stepCount, out, err)
@@ -659,5 +633,152 @@ func TestMaxSafeLeafCount_Bounds(t *testing.T) {
 	}
 	if (maxSafeLeafCount+1)*agnt2LeafSize <= uint64(^uint32(0)) {
 		t.Fatalf("(maxSafeLeafCount+1)*leafSize must exceed uint32; got %d", (maxSafeLeafCount+1)*agnt2LeafSize)
+	}
+}
+
+// --- MMR Phase 5 Tests ---
+
+func computeMMRRoot(leaves [][]byte) [32]byte {
+	m := &agnt2MMR{}
+	for _, l := range leaves {
+		var h [32]byte
+		copy(h[:], crypto.Keccak256(l))
+		m.append(h)
+	}
+	return m.getRoot()
+}
+
+func makeCanonicalChain(workflowID string, steps []struct {
+	stepID, agentRole string
+	payout            uint64
+}) [][]byte {
+	leaves := make([][]byte, len(steps))
+	var prevHash [32]byte
+
+	for i, step := range steps {
+		var buf []byte
+		buf = append(buf, crypto.Keccak256Hash([]byte(workflowID)).Bytes()...)
+		buf = append(buf, crypto.Keccak256Hash([]byte(step.stepID)).Bytes()...)
+		buf = append(buf, crypto.Keccak256Hash([]byte(step.agentRole)).Bytes()...)
+
+		padded := make([]byte, 32)
+		binary.BigEndian.PutUint64(padded[24:32], step.payout)
+		buf = append(buf, padded...)
+		buf = append(buf, prevHash[:]...)
+
+		leaves[i] = buf
+		prevHash = crypto.Keccak256Hash(buf)
+	}
+	return leaves
+}
+
+func TestRun_MMRRoot_v1_3step(t *testing.T) {
+	wfID := "test-wf-001"
+	steps := []struct {
+		stepID, agentRole string
+		payout            uint64
+	}{
+		{"step-1", "worker-a", 1000},
+		{"step-2", "worker-b", 2000},
+		{"step-3", "worker-c", 3000},
+	}
+	leavesBytes := makeCanonicalChain(wfID, steps)
+	var flat []byte
+	for _, l := range leavesBytes {
+		flat = append(flat, l...)
+	}
+
+	c := &agnt2Interaction{}
+	out, err := c.Run(makeInputWithLeaves(wfID, flat))
+	if err != nil || out != nil {
+		t.Fatalf("expected success, got err=%v, out=%v", err, out)
+	}
+
+	root := computeMMRRoot(leavesBytes)
+	expectedBytes, _ := hex.DecodeString("d54c19717603e20fbf82ff44e90eafd7d1ad14ef4d7811f8802cc3c078cc86c3")
+	var expected [32]byte
+	copy(expected[:], expectedBytes)
+
+	if !bytes.Equal(root[:], expected[:]) {
+		t.Fatalf("v1_3step MMR root mismatch: want %x, got %x", expected, root)
+	}
+}
+
+func TestRun_MMRRoot_v4_5step(t *testing.T) {
+	wfID := "test-wf-005"
+	steps := []struct {
+		stepID, agentRole string
+		payout            uint64
+	}{
+		{"step-1", "worker-a", 1000},
+		{"step-2", "worker-b", 2000},
+		{"step-3", "worker-c", 3000},
+		{"step-4", "worker-d", 4000},
+		{"step-5", "worker-e", 5000},
+	}
+	leavesBytes := makeCanonicalChain(wfID, steps)
+	var flat []byte
+	for _, l := range leavesBytes {
+		flat = append(flat, l...)
+	}
+
+	c := &agnt2Interaction{}
+	out, err := c.Run(makeInputWithLeaves(wfID, flat))
+	if err != nil || out != nil {
+		t.Fatalf("expected success, got err=%v, out=%v", err, out)
+	}
+
+	root := computeMMRRoot(leavesBytes)
+	expectedBytes, _ := hex.DecodeString("e34cda67eaf574138a02ab6ea87fd1ec55f8e3c09545f2c7c44edb8365316c91")
+	var expected [32]byte
+	copy(expected[:], expectedBytes)
+
+	if !bytes.Equal(root[:], expected[:]) {
+		t.Fatalf("v4_5step MMR root mismatch: want %x, got %x", expected, root)
+	}
+}
+
+func TestRun_MMREmpty(t *testing.T) {
+	c := &agnt2Interaction{}
+	out, err := c.Run(makeInput(0x00, 0, 0))
+	if err != nil || out != nil {
+		t.Fatalf("expected success, got err=%v, out=%v", err, out)
+	}
+
+	m := &agnt2MMR{}
+	root := m.getRoot()
+	expectedBytes, _ := hex.DecodeString("c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470")
+	var expected [32]byte
+	copy(expected[:], expectedBytes)
+
+	if !bytes.Equal(root[:], expected[:]) {
+		t.Fatalf("empty MMR root mismatch: want %x, got %x", expected, root)
+	}
+}
+
+func TestAgnt2MMR_BuildTreeMatches_TS(t *testing.T) {
+	var leaves [][32]byte
+	for i := 0; i < 3; i++ {
+		var l [32]byte
+		l[0] = byte(i + 1)
+		leaves = append(leaves, l)
+	}
+	m := &agnt2MMR{leaves: leaves}
+	root := m.getRoot()
+
+	var p0_combined [64]byte
+	copy(p0_combined[0:32], leaves[0][:])
+	copy(p0_combined[32:64], leaves[1][:])
+	var peak0 [32]byte
+	copy(peak0[:], crypto.Keccak256(p0_combined[:]))
+
+	var final_combined [64]byte
+	copy(final_combined[0:32], peak0[:])
+	copy(final_combined[32:64], leaves[2][:])
+	var expectedRoot [32]byte
+	copy(expectedRoot[:], crypto.Keccak256(final_combined[:]))
+
+	if !bytes.Equal(root[:], expectedRoot[:]) {
+		t.Fatalf("build tree fold mismatch: want %x, got %x", expectedRoot, root)
 	}
 }
