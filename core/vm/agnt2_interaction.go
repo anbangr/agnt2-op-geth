@@ -64,6 +64,9 @@ const (
 	// agnt2LeafSize can't silently shift the bound and mask a regression in
 	// TestMaxSafeLeafCount_Bounds. /review re-iteration flagged the prior
 	// derivation as brittle to constant edits.
+	// As of Week 11 Phase 3, this is now defense-in-depth BELOW the operational
+	// cap params.AGNT2MaxStepsPerCall = 10_000. The operational cap is the tighter
+	// bound; this wrap protector is the unreachable lower-level guard.
 	maxSafeLeafCount uint64 = 26_843_545
 	maxWorkflowIDLen        = 1024
 )
@@ -122,7 +125,7 @@ func (c *agnt2Interaction) Name() string { return "AGNT2_INTERACTION" }
 
 // RequiredGas mirrors Run()'s validation cheaply. It charges only base gas
 // when input is malformed, the version byte is wrong, stepCount would trip
-// the overflow guard, or the calldata length is inconsistent with stepCount.
+// the overflow guard, the operational MAX_STEPS_PER_CALL cap, or the calldata length is inconsistent with stepCount.
 // This closes the gas-grief vector where a caller submits valid version and
 // valid stepCount but truncated body — the EVM previously billed
 // stepCount * agnt2PerStepGas before Run() rejected with revertMalformedCalldata
@@ -135,6 +138,9 @@ func (c *agnt2Interaction) RequiredGas(input []byte) uint64 {
 		return params.AGNT2BaseGas
 	}
 	stepCount := uint64(binary.BigEndian.Uint32(input[1:5]))
+	if stepCount > params.AGNT2MaxStepsPerCall {
+		return params.AGNT2BaseGas
+	}
 	if stepCount > maxSafeLeafCount {
 		return params.AGNT2BaseGas
 	}
@@ -213,6 +219,9 @@ func (c *agnt2Interaction) Run(input []byte) ([]byte, error) {
 	}
 
 	stepCount := uint64(binary.BigEndian.Uint32(input[1:5]))
+	if stepCount > params.AGNT2MaxStepsPerCall {
+		return []byte{revertStepOverflow}, ErrExecutionReverted
+	}
 	if stepCount > maxSafeLeafCount {
 		return []byte{revertStepOverflow}, ErrExecutionReverted
 	}
