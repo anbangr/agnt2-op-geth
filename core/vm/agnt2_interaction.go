@@ -116,7 +116,8 @@ func parseWorkflowID(input []byte) ([]byte, uint64, byte) {
 type agnt2Interaction struct{}
 
 // Name implements vm.PrecompiledContract for tracing/registry purposes.
-func (c *agnt2Interaction) Name() string { return "agnt2-interaction" }
+// Uppercase short token matches upstream convention (ECREC, SHA256, BN254_ADD).
+func (c *agnt2Interaction) Name() string { return "AGNT2_INTERACTION" }
 
 // RequiredGas mirrors Run()'s validation cheaply. It charges only base gas
 // when input is malformed, the version byte is wrong, stepCount would trip

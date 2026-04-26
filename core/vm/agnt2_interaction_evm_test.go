@@ -55,16 +55,20 @@ func TestAgnt2Registry_NoCollisionWithUpstreamPrecompiles(t *testing.T) {
 	// in the pre-AGNT2 fork tables. If upstream ever lands a precompile at
 	// 0x0BC2 or 0x0B/0xBC2 prefix-collides with one, this test fires before
 	// the silent override does damage.
+	//
+	// PrecompiledContractsBLS aliases Prague and PrecompiledContractsVerkle
+	// aliases Berlin, so those are covered transitively.
 	conflictSets := map[string]PrecompiledContracts{
-		"Cancun":    PrecompiledContractsCancun,
-		"Prague":    PrecompiledContractsPrague,
-		"Osaka":     PrecompiledContractsOsaka,
-		"Fjord":     PrecompiledContractsFjord,
-		"Granite":   PrecompiledContractsGranite,
-		"Homestead": PrecompiledContractsHomestead,
-		"Byzantium": PrecompiledContractsByzantium,
-		"Istanbul":  PrecompiledContractsIstanbul,
-		"Berlin":    PrecompiledContractsBerlin,
+		"Cancun":     PrecompiledContractsCancun,
+		"Prague":     PrecompiledContractsPrague,
+		"Osaka":      PrecompiledContractsOsaka,
+		"Fjord":      PrecompiledContractsFjord,
+		"Granite":    PrecompiledContractsGranite,
+		"Homestead":  PrecompiledContractsHomestead,
+		"Byzantium":  PrecompiledContractsByzantium,
+		"Istanbul":   PrecompiledContractsIstanbul,
+		"Berlin":     PrecompiledContractsBerlin,
+		"P256Verify": PrecompiledContractsP256Verify,
 	}
 	for name, set := range conflictSets {
 		if _, exists := set[AGNT2InteractionPrecompileAddress]; exists {
@@ -73,42 +77,85 @@ func TestAgnt2Registry_NoCollisionWithUpstreamPrecompiles(t *testing.T) {
 	}
 }
 
+// TestAgnt2Registry_AddressSliceIncludes0x0BC2 proves that contracts.go's
+// init() iteration over the precompile maps observed our 0x0BC2 mutation
+// (init order: agnt2_*.go runs before contracts.go alphabetically). Without
+// this, ActivePrecompiles() callers (tracing, debug RPC) would not list
+// the AGNT2 precompile as known.
+func TestAgnt2Registry_AddressSliceIncludes0x0BC2(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		addresses []common.Address
+	}{
+		{"Isthmus", PrecompiledAddressesIsthmus},
+		{"Jovian", PrecompiledAddressesJovian},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			found := false
+			for _, addr := range tc.addresses {
+				if addr == AGNT2InteractionPrecompileAddress {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("PrecompiledAddresses%s slice missing 0x0BC2 — init() ordering broken", tc.name)
+			}
+		})
+	}
+}
+
 // TestAgnt2Dispatch_HappyPath_1Step exercises the full RunPrecompiledContract
 // path that op-geth uses when an EVM CALL targets a precompile address.
+// Parameterized over both Isthmus and Jovian precompile sets to confirm
+// dispatch works on both Optimism fork-tags AGNT2 supports.
+//
 // Asserts: (a) the precompile resolves via the registry, (b) gas is charged
 // at AGNT2BaseGas + N*AGNT2PerStepGas exactly, (c) returnData is empty on
 // success, (d) no err.
 func TestAgnt2Dispatch_HappyPath_1Step(t *testing.T) {
-	t.Cleanup(globalAgnt2EventStore.reset)
-	globalAgnt2EventStore.reset()
-	t.Cleanup(globalAgnt2RootStore.reset)
+	for _, tc := range []struct {
+		name string
+		set  PrecompiledContracts
+	}{
+		{"Isthmus", PrecompiledContractsIsthmus},
+		{"Jovian", PrecompiledContractsJovian},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Cleanup(globalAgnt2EventStore.reset)
+			globalAgnt2EventStore.reset()
+			t.Cleanup(globalAgnt2RootStore.reset)
 
-	p, ok := PrecompiledContractsJovian[AGNT2InteractionPrecompileAddress]
-	if !ok {
-		t.Fatalf("0x0BC2 not registered")
-	}
+			p, ok := tc.set[AGNT2InteractionPrecompileAddress]
+			if !ok {
+				t.Fatalf("0x0BC2 not registered in %s", tc.name)
+			}
 
-	wfID := "evm-dispatch-happy-1"
-	expectedHash := crypto.Keccak256([]byte(wfID))
-	leaves := makeChainedLeaves(expectedHash, 1)
-	input := makeInputWithLeaves(wfID, leaves)
+			wfID := "evm-dispatch-happy-1"
+			expectedHash := crypto.Keccak256([]byte(wfID))
+			leaves := makeChainedLeaves(expectedHash, 1)
+			input := makeInputWithLeaves(wfID, leaves)
 
-	expectedGas := params.AGNT2BaseGas + 1*params.AGNT2PerStepGas
-	suppliedGas := expectedGas + 1_000_000 // generous budget; assert remaining
+			expectedGas := params.AGNT2BaseGas + 1*params.AGNT2PerStepGas
+			suppliedGas := expectedGas + 1_000_000
 
-	ret, remainingGas, err := RunPrecompiledContract(nil, p, AGNT2InteractionPrecompileAddress, input, suppliedGas, nil)
-	if err != nil {
-		t.Fatalf("dispatch failed: %v", err)
-	}
-	if ret != nil {
-		t.Fatalf("expected empty return data on success, got %x", ret)
-	}
-	if got := suppliedGas - remainingGas; got != expectedGas {
-		t.Fatalf("gas charged %d, want %d (= AGNT2BaseGas %d + 1*AGNT2PerStepGas %d)",
-			got, expectedGas, params.AGNT2BaseGas, params.AGNT2PerStepGas)
-	}
-	if got := len(LastEmittedEvents()); got != 1 {
-		t.Fatalf("expected 1 leaf event committed via dispatch, got %d", got)
+			ret, remainingGas, err := RunPrecompiledContract(nil, p, AGNT2InteractionPrecompileAddress, input, suppliedGas, nil)
+			if err != nil {
+				t.Fatalf("dispatch failed: %v", err)
+			}
+			if ret != nil {
+				t.Fatalf("expected empty return data on success, got %x", ret)
+			}
+			if got := suppliedGas - remainingGas; got != expectedGas {
+				t.Fatalf("gas charged %d, want %d (= AGNT2BaseGas %d + 1*AGNT2PerStepGas %d)",
+					got, expectedGas, params.AGNT2BaseGas, params.AGNT2PerStepGas)
+			}
+			if got := len(LastEmittedEvents()); got != 1 {
+				t.Fatalf("expected 1 leaf event committed via dispatch, got %d", got)
+			}
+		})
 	}
 }
 
