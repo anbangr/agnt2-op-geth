@@ -49,7 +49,7 @@ func init() {
 const (
 	revertInvalidVersion          byte = 0x01 // byte 0 is not 0x00
 	revertMalformedCalldata       byte = 0x02 // total length is inconsistent with step_count
-	revertStepOverflow            byte = 0x03 // step_count * 160 exceeds the calldata size limit
+	revertStepOverflow            byte = 0x03 // step_count > params.AGNT2MaxStepsPerCall (operational cap) OR step_count * 160 exceeds uint32 (wrap protector)
 	revertTrieWriteFailed         byte = 0x04 // MMR leaf write failed (Week 10 only)
 	revertNotImplemented          byte = 0x05 // unused — retired by Phase 5
 	revertWorkflowIDInvalid       byte = 0x06 // workflow_id parsing failed (offset, length, padding, range)
