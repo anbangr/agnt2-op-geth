@@ -4,6 +4,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"testing"
+
+	"github.com/ethereum/go-ethereum/params"
 )
 
 // makeInput builds calldata: version + stepCount(BE uint32) + body bytes.
@@ -135,23 +137,23 @@ func TestRequiredGas(t *testing.T) {
 		input []byte
 		want  uint64
 	}{
-		{"empty input -> base only", []byte{}, agnt2BaseGas},
-		{"4 bytes -> base only", []byte{0x00, 0x00, 0x00, 0x00}, agnt2BaseGas},
-		{"bad version -> base only (no step gas)", makeInput(0x01, 1000, 0), agnt2BaseGas},
-		{"valid 0 steps", makeInput(0x00, 0, 0), agnt2BaseGas},
+		{"empty input -> base only", []byte{}, params.AGNT2BaseGas},
+		{"4 bytes -> base only", []byte{0x00, 0x00, 0x00, 0x00}, params.AGNT2BaseGas},
+		{"bad version -> base only (no step gas)", makeInput(0x01, 1000, 0), params.AGNT2BaseGas},
+		{"valid 0 steps", makeInput(0x00, 0, 0), params.AGNT2BaseGas},
 		// Week 9: stepCount > 0 reverts with revertNotImplemented in Run, so
 		// RequiredGas charges base only. Once Week 10 wires the writer, these
 		// cases flip back to base + N*perStep.
-		{"valid 1 step (Week 9 revert)", makeInput(0x00, 1, 160), agnt2BaseGas},
-		{"valid 100 steps (Week 9 revert)", makeInput(0x00, 100, 16000), agnt2BaseGas},
-		{"overflow stepCount -> base only", makeInput(0x00, uint32(maxSafeLeafCount+1), 0), agnt2BaseGas},
+		{"valid 1 step (Week 9 revert)", makeInput(0x00, 1, 160), params.AGNT2BaseGas},
+		{"valid 100 steps (Week 9 revert)", makeInput(0x00, 100, 16000), params.AGNT2BaseGas},
+		{"overflow stepCount -> base only", makeInput(0x00, uint32(maxSafeLeafCount+1), 0), params.AGNT2BaseGas},
 		// Length-grief regression — multi-specialist confirmed during /review.
 		// Caller declares stepCount=1000 but supplies only the 5-byte header.
 		// Pre-fix: billed 21000 + 1000*2000 = 2_021_000 gas while Run() rejects
 		// in microseconds. Post-fix: base gas only.
-		{"length-grief: stepCount=1000, 5-byte body", makeInput(0x00, 1000, 0), agnt2BaseGas},
-		{"length-grief: stepCount=1, 159-byte body (short)", makeInput(0x00, 1, 159), agnt2BaseGas},
-		{"length-grief: stepCount=1, 161-byte body (long)", makeInput(0x00, 1, 161), agnt2BaseGas},
+		{"length-grief: stepCount=1000, 5-byte body", makeInput(0x00, 1000, 0), params.AGNT2BaseGas},
+		{"length-grief: stepCount=1, 159-byte body (short)", makeInput(0x00, 1, 159), params.AGNT2BaseGas},
+		{"length-grief: stepCount=1, 161-byte body (long)", makeInput(0x00, 1, 161), params.AGNT2BaseGas},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -183,7 +185,7 @@ func TestRequiredGas_Run_NoOvercharge(t *testing.T) {
 	}
 	for _, in := range rejecting {
 		gas := c.RequiredGas(in)
-		if gas > agnt2BaseGas {
+		if gas > params.AGNT2BaseGas {
 			t.Fatalf("RequiredGas charged %d (> base) for input Run rejects: %v", gas, in[:min(len(in), 16)])
 		}
 		if _, err := c.Run(in); err == nil {
@@ -208,7 +210,7 @@ func TestRequiredGas_Run_AcceptanceInvariant(t *testing.T) {
 		if err != nil || out != nil {
 			t.Fatalf("Run rejected stepCount=%d: out=%v err=%v", stepCount, out, err)
 		}
-		want := agnt2BaseGas + uint64(stepCount)*agnt2PerStepGas
+		want := params.AGNT2BaseGas + uint64(stepCount)*params.AGNT2PerStepGas
 		got := c.RequiredGas(input)
 		if got != want {
 			t.Fatalf("stepCount=%d: RequiredGas want %d, got %d", stepCount, want, got)

@@ -6,6 +6,6 @@ import "github.com/ethereum/go-ethereum/common"
 var AGNT2InteractionPrecompileAddress = common.HexToAddress("0x0BC2")
 
 const (
-	AGNT2_BASE_GAS     uint64 = 21000
-	AGNT2_PER_STEP_GAS uint64 = 2000
+	AGNT2BaseGas    uint64 = 21000
+	AGNT2PerStepGas uint64 = 2000
 )

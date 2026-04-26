@@ -3,6 +3,8 @@ package vm
 import (
 	"encoding/binary"
 	"errors"
+
+	"github.com/ethereum/go-ethereum/params"
 )
 
 // ErrAGNT2Reverted is the sentinel returned alongside a one-byte error code.
@@ -25,8 +27,6 @@ const (
 )
 
 const (
-	agnt2BaseGas    uint64 = 21000
-	agnt2PerStepGas uint64 = 2000
 	agnt2LeafSize   uint64 = 160
 	// maxSafeLeafCount = floor((2^32 - 1) / 160) = 26_843_545.
 	// Pinned as an explicit literal (not a derivation) so a future change to
@@ -54,25 +54,25 @@ type agnt2Interaction struct{}
 // Abort forbids.
 func (c *agnt2Interaction) RequiredGas(input []byte) uint64 {
 	if len(input) < 5 {
-		return agnt2BaseGas
+		return params.AGNT2BaseGas
 	}
 	if input[0] != 0x00 {
-		return agnt2BaseGas
+		return params.AGNT2BaseGas
 	}
 	stepCount := uint64(binary.BigEndian.Uint32(input[1:5]))
 	if stepCount > maxSafeLeafCount {
-		return agnt2BaseGas
+		return params.AGNT2BaseGas
 	}
 	expectedLen := uint64(5) + stepCount*agnt2LeafSize
 	if uint64(len(input)) != expectedLen {
-		return agnt2BaseGas
+		return params.AGNT2BaseGas
 	}
 	// Week 9: stepCount > 0 reverts in Run, so charge base only. Once Week 10
 	// wires the writer, drop this branch and bill the full per-step amount.
 	if stepCount > 0 {
-		return agnt2BaseGas
+		return params.AGNT2BaseGas
 	}
-	return agnt2BaseGas + stepCount*agnt2PerStepGas
+	return params.AGNT2BaseGas + stepCount*params.AGNT2PerStepGas
 }
 
 func (c *agnt2Interaction) Run(input []byte) ([]byte, error) {
