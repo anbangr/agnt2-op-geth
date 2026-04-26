@@ -28,6 +28,7 @@ const (
 	revertNotImplemented          byte = 0x05 // stepCount > 0 in Week 9 — MMR writer is Week 10 scope
 	revertWorkflowIDInvalid       byte = 0x06 // workflow_id parsing failed (offset, length, padding, range)
 	revertWorkflowBindingMismatch byte = 0x07 // leaf.workflowIdHash != keccak256(workflow_id)
+	revertLeafChainBroken         byte = 0x08 // leaf[i].prevLeafHash != leafHash(leaf[i-1])
 )
 
 const (
@@ -165,20 +166,26 @@ func (c *agnt2Interaction) Run(input []byte) ([]byte, error) {
 		return []byte{revertMalformedCalldata}, ErrAGNT2Reverted
 	}
 
-	// Phase 3 — Workflow binding check (ADR 002 §Week-10-Scope item 2).
-	// For each leaf, verify the first 32 bytes (workflowIdHash field) match
-	// keccak256(workflow_id). Without this, a caller could pack leaves for
-	// workflow A under calldata claiming workflow B. The binding must be
-	// enforced for stepCount > 0; for stepCount == 0 there are no leaves.
+	// Phases 3 + 4 — Per-leaf validation (ADR 002 §Week-10-Scope items 2 + 3).
+	// Single pass: workflow binding (each leaf.workflowIdHash == keccak256(wfID))
+	// and prevLeafHash chain (leaf[i].prevLeafHash == leafHash(leaf[i-1]),
+	// zero for i==0). For stepCount == 0 there are no leaves.
 	if stepCount > 0 {
 		expectedWfHash := crypto.Keccak256(workflowID)
 		leavesStart := uint64(5) + abiHeaderSize
+		var prevHash [32]byte // zero for leaf[0] (genesis chain anchor)
 		for i := uint64(0); i < stepCount; i++ {
 			leafStart := leavesStart + i*agnt2LeafSize
-			leafWfHash := input[leafStart : leafStart+32]
-			if !bytes.Equal(leafWfHash, expectedWfHash) {
+			leafBytes := input[leafStart : leafStart+agnt2LeafSize]
+			// Phase 3 — workflow binding
+			if !bytes.Equal(leafBytes[0:32], expectedWfHash) {
 				return []byte{revertWorkflowBindingMismatch}, ErrAGNT2Reverted
 			}
+			// Phase 4 — prevLeafHash chain
+			if !bytes.Equal(leafBytes[128:160], prevHash[:]) {
+				return []byte{revertLeafChainBroken}, ErrAGNT2Reverted
+			}
+			copy(prevHash[:], crypto.Keccak256(leafBytes))
 		}
 	}
 
@@ -201,9 +208,6 @@ func (c *agnt2Interaction) Run(input []byte) ([]byte, error) {
 	}
 
 	// TODO Week 10 — replace the stepCount>0 revert above with full integration:
-	//   - Phase 4 (prevLeafHash chain validation): Verify leaf[i].prevLeafHash ==
-	//     leafHash(leaf[i-1]), zero for i==0. A broken chain means the commit
-	//     would derive a root the verifier cannot match.
 	//   - Phase 5 (MMR shadow-copy commit): Shadow-copy the MMR trie, append all
 	//     leaves in topological order, commit only after every leaf write succeeds.
 	//   - Phase 6 (Block-header root): Update the L2 block header interaction root.

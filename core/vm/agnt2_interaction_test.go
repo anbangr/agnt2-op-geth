@@ -76,11 +76,35 @@ func makeInputWithLeaves(wfID string, leaves []byte) []byte {
 	return buf
 }
 
+// makeChainedLeaves builds n leaves where each leaf[i].prevLeafHash =
+// keccak256(leaf[i-1]) and leaf[0].prevLeafHash = bytes32(0). All leaves
+// share the given wfHash. Other fields use deterministic patterns derived
+// from i (so different stepIdHashes yield distinct leafHashes).
+func makeChainedLeaves(wfHash []byte, n int) []byte {
+	result := make([]byte, n*160)
+	var prevHash [32]byte
+	for i := 0; i < n; i++ {
+		leaf := result[i*160 : (i+1)*160]
+		copy(leaf[0:32], wfHash)
+		// stepIdHash: vary by i so leafHashes differ
+		leaf[63] = byte(i + 1)
+		// agentRoleHash: vary by i
+		leaf[95] = byte(i + 1)
+		// payout: i+1 in low byte
+		leaf[127] = byte(i + 1)
+		// prevLeafHash: previous leafHash
+		copy(leaf[128:160], prevHash[:])
+		// Compute next prevHash
+		copy(prevHash[:], crypto.Keccak256(leaf))
+	}
+	return result
+}
+
 func TestParseWorkflowID_Valid(t *testing.T) {
 	c := &agnt2Interaction{}
 	wfID := "test-wf-001"
 	expectedHash := crypto.Keccak256([]byte(wfID))
-	leaves := makeLeaf(expectedHash, 0xAB)
+	leaves := makeChainedLeaves(expectedHash, 1)
 	out, err := c.Run(makeInputWithLeaves(wfID, leaves))
 	if !errors.Is(err, ErrAGNT2Reverted) {
 		t.Fatalf("expected ErrAGNT2Reverted, got %v", err)
@@ -230,7 +254,7 @@ func TestRun_NotImplementedOneStep(t *testing.T) {
 	c := &agnt2Interaction{}
 	wfID := "test-wf-001"
 	expectedHash := crypto.Keccak256([]byte(wfID))
-	leaves := makeLeaf(expectedHash, 0xAA)
+	leaves := makeChainedLeaves(expectedHash, 1)
 	out, err := c.Run(makeInputWithLeaves(wfID, leaves))
 	if !errors.Is(err, ErrAGNT2Reverted) {
 		t.Fatalf("Week 9: one-step call must revert with ErrAGNT2Reverted; got err=%v", err)
@@ -248,10 +272,7 @@ func TestRun_NotImplementedSweep(t *testing.T) {
 	wfID := "test-sweep"
 	expectedHash := crypto.Keccak256([]byte(wfID))
 	for _, stepCount := range []uint32{1, 2, 10, 100, 1000} {
-		leaves := make([]byte, 0, stepCount*160)
-		for i := uint32(0); i < stepCount; i++ {
-			leaves = append(leaves, makeLeaf(expectedHash, 0xBB)...)
-		}
+		leaves := makeChainedLeaves(expectedHash, int(stepCount))
 		input := makeInputWithLeaves(wfID, leaves)
 		out, err := c.Run(input)
 		if !errors.Is(err, ErrAGNT2Reverted) {
@@ -268,7 +289,7 @@ func TestRun_WorkflowBindingValid_OneStep(t *testing.T) {
 	c := &agnt2Interaction{}
 	wfID := "test-wf-001"
 	expectedHash := crypto.Keccak256([]byte(wfID))
-	leaves := makeLeaf(expectedHash, 0xAA)
+	leaves := makeChainedLeaves(expectedHash, 1)
 	out, err := c.Run(makeInputWithLeaves(wfID, leaves))
 	if !errors.Is(err, ErrAGNT2Reverted) {
 		t.Fatalf("expected ErrAGNT2Reverted, got %v", err)
@@ -282,10 +303,7 @@ func TestRun_WorkflowBindingValid_ThreeStep(t *testing.T) {
 	c := &agnt2Interaction{}
 	wfID := "test-wf-001"
 	expectedHash := crypto.Keccak256([]byte(wfID))
-	leaves := make([]byte, 0, 3*160)
-	for i := 0; i < 3; i++ {
-		leaves = append(leaves, makeLeaf(expectedHash, byte(0xAA+i))...)
-	}
+	leaves := makeChainedLeaves(expectedHash, 3)
 	out, err := c.Run(makeInputWithLeaves(wfID, leaves))
 	if !errors.Is(err, ErrAGNT2Reverted) {
 		t.Fatalf("expected ErrAGNT2Reverted, got %v", err)
@@ -295,11 +313,102 @@ func TestRun_WorkflowBindingValid_ThreeStep(t *testing.T) {
 	}
 }
 
+func TestRun_ChainValid_OneStep(t *testing.T) {
+	c := &agnt2Interaction{}
+	wfID := "test-wf-001"
+	expectedHash := crypto.Keccak256([]byte(wfID))
+	leaves := makeChainedLeaves(expectedHash, 1)
+	out, err := c.Run(makeInputWithLeaves(wfID, leaves))
+	if !errors.Is(err, ErrAGNT2Reverted) {
+		t.Fatalf("expected ErrAGNT2Reverted, got %v", err)
+	}
+	if len(out) != 1 || out[0] != revertNotImplemented {
+		t.Fatalf("expected revertNotImplemented (0x05), got %v", out)
+	}
+}
+
+func TestRun_ChainValid_ThreeStep(t *testing.T) {
+	c := &agnt2Interaction{}
+	wfID := "test-wf-001"
+	expectedHash := crypto.Keccak256([]byte(wfID))
+	leaves := makeChainedLeaves(expectedHash, 3)
+	out, err := c.Run(makeInputWithLeaves(wfID, leaves))
+	if !errors.Is(err, ErrAGNT2Reverted) {
+		t.Fatalf("expected ErrAGNT2Reverted, got %v", err)
+	}
+	if len(out) != 1 || out[0] != revertNotImplemented {
+		t.Fatalf("expected revertNotImplemented (0x05), got %v", out)
+	}
+}
+
+func TestRun_ChainBrokenAtFirst(t *testing.T) {
+	c := &agnt2Interaction{}
+	wfID := "test-wf-001"
+	expectedHash := crypto.Keccak256([]byte(wfID))
+	leaves := makeChainedLeaves(expectedHash, 1)
+	leaves[160-1] = 0xFF // corrupt prevLeafHash of leaf[0]
+	out, err := c.Run(makeInputWithLeaves(wfID, leaves))
+	if !errors.Is(err, ErrAGNT2Reverted) {
+		t.Fatalf("expected ErrAGNT2Reverted, got %v", err)
+	}
+	if len(out) != 1 || out[0] != revertLeafChainBroken {
+		t.Fatalf("expected revertLeafChainBroken (0x08), got %v", out)
+	}
+}
+
+func TestRun_ChainBrokenAtMiddle(t *testing.T) {
+	c := &agnt2Interaction{}
+	wfID := "test-wf-001"
+	expectedHash := crypto.Keccak256([]byte(wfID))
+	leaves := makeChainedLeaves(expectedHash, 3)
+	leaves[160+160-1] = 0xFF // corrupt prevLeafHash of leaf[1]
+	out, err := c.Run(makeInputWithLeaves(wfID, leaves))
+	if !errors.Is(err, ErrAGNT2Reverted) {
+		t.Fatalf("expected ErrAGNT2Reverted, got %v", err)
+	}
+	if len(out) != 1 || out[0] != revertLeafChainBroken {
+		t.Fatalf("expected revertLeafChainBroken (0x08), got %v", out)
+	}
+}
+
+func TestRun_ChainBrokenAtLast(t *testing.T) {
+	c := &agnt2Interaction{}
+	wfID := "test-wf-001"
+	expectedHash := crypto.Keccak256([]byte(wfID))
+	leaves := makeChainedLeaves(expectedHash, 3)
+	leaves[2*160+160-1] = 0xFF // corrupt prevLeafHash of leaf[2]
+	out, err := c.Run(makeInputWithLeaves(wfID, leaves))
+	if !errors.Is(err, ErrAGNT2Reverted) {
+		t.Fatalf("expected ErrAGNT2Reverted, got %v", err)
+	}
+	if len(out) != 1 || out[0] != revertLeafChainBroken {
+		t.Fatalf("expected revertLeafChainBroken (0x08), got %v", out)
+	}
+}
+
+func TestRun_BindingPrecedesChain(t *testing.T) {
+	c := &agnt2Interaction{}
+	wfID := "test-wf-001"
+	expectedHash := crypto.Keccak256([]byte(wfID))
+	leaves := makeChainedLeaves(expectedHash, 1)
+	leaves[0] ^= 0xFF    // corrupt workflowIdHash -> binding mismatch
+	leaves[160-1] = 0xFF // corrupt prevLeafHash -> chain broken
+	out, err := c.Run(makeInputWithLeaves(wfID, leaves))
+	if !errors.Is(err, ErrAGNT2Reverted) {
+		t.Fatalf("expected ErrAGNT2Reverted, got %v", err)
+	}
+	if len(out) != 1 || out[0] != revertWorkflowBindingMismatch {
+		t.Fatalf("expected revertWorkflowBindingMismatch (0x07), got %v", out)
+	}
+}
+
 func TestRun_WorkflowBindingMismatch_FirstLeaf(t *testing.T) {
 	c := &agnt2Interaction{}
 	wfID := "test-wf-001"
+	expectedHash := crypto.Keccak256([]byte(wfID))
 	wrongHash := crypto.Keccak256([]byte("test-wf-002"))
-	leaves := makeLeaf(wrongHash, 0xAA)
+	leaves := makeChainedLeaves(expectedHash, 1)
+	copy(leaves[0:32], wrongHash)
 	out, err := c.Run(makeInputWithLeaves(wfID, leaves))
 	if !errors.Is(err, ErrAGNT2Reverted) {
 		t.Fatalf("expected ErrAGNT2Reverted, got %v", err)
@@ -314,10 +423,8 @@ func TestRun_WorkflowBindingMismatch_LastLeaf(t *testing.T) {
 	wfID := "test-wf-001"
 	expectedHash := crypto.Keccak256([]byte(wfID))
 	wrongHash := crypto.Keccak256([]byte("test-wf-002"))
-	leaves := make([]byte, 0, 3*160)
-	leaves = append(leaves, makeLeaf(expectedHash, 0xAA)...)
-	leaves = append(leaves, makeLeaf(expectedHash, 0xBB)...)
-	leaves = append(leaves, makeLeaf(wrongHash, 0xCC)...)
+	leaves := makeChainedLeaves(expectedHash, 3)
+	copy(leaves[2*160:2*160+32], wrongHash)
 	out, err := c.Run(makeInputWithLeaves(wfID, leaves))
 	if !errors.Is(err, ErrAGNT2Reverted) {
 		t.Fatalf("expected ErrAGNT2Reverted, got %v", err)
@@ -332,10 +439,8 @@ func TestRun_WorkflowBindingMismatch_MiddleLeaf(t *testing.T) {
 	wfID := "test-wf-001"
 	expectedHash := crypto.Keccak256([]byte(wfID))
 	wrongHash := crypto.Keccak256([]byte("test-wf-002"))
-	leaves := make([]byte, 0, 3*160)
-	leaves = append(leaves, makeLeaf(expectedHash, 0xAA)...)
-	leaves = append(leaves, makeLeaf(wrongHash, 0xBB)...)
-	leaves = append(leaves, makeLeaf(expectedHash, 0xCC)...)
+	leaves := makeChainedLeaves(expectedHash, 3)
+	copy(leaves[160:160+32], wrongHash)
 	out, err := c.Run(makeInputWithLeaves(wfID, leaves))
 	if !errors.Is(err, ErrAGNT2Reverted) {
 		t.Fatalf("expected ErrAGNT2Reverted, got %v", err)
@@ -535,6 +640,9 @@ func TestRevertCodeValues(t *testing.T) {
 	}
 	if revertWorkflowBindingMismatch != 0x07 {
 		t.Errorf("revertWorkflowBindingMismatch = 0x%02x, want 0x07", revertWorkflowBindingMismatch)
+	}
+	if revertLeafChainBroken != 0x08 {
+		t.Errorf("revertLeafChainBroken = 0x%02x, want 0x08", revertLeafChainBroken)
 	}
 }
 
