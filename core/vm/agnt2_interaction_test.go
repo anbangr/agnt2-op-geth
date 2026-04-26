@@ -1,6 +1,7 @@
 package vm
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"testing"
@@ -13,20 +14,20 @@ func makeInputWithWfID(version byte, wfID string, stepCount uint32, bodyBytes in
 	idBytes := []byte(wfID)
 	l := len(idBytes)
 	paddedLen := (l + 31) / 32 * 32
-	
+
 	buf := make([]byte, 5+64+paddedLen+bodyBytes)
 	buf[0] = version
 	binary.BigEndian.PutUint32(buf[1:5], stepCount)
-	
+
 	// offset (0x20)
 	buf[36] = 0x20
-	
+
 	// length
 	binary.BigEndian.PutUint32(buf[65:69], uint32(l))
-	
+
 	// string bytes
 	copy(buf[69:69+l], idBytes)
-	
+
 	// body
 	if bodyBytes > 0 {
 		// 0xAB pattern is recognizable in test failures and not all-zero.
@@ -109,6 +110,68 @@ func TestParseWorkflowID_ZeroSteps(t *testing.T) {
 	out, err := c.Run(makeInputWithWfID(0x00, "hello", 0, 0))
 	if err != nil || out != nil {
 		t.Fatalf("zero steps should succeed, got %v, %v", out, err)
+	}
+}
+
+func TestParseWorkflowID_LengthOne(t *testing.T) {
+	c := &agnt2Interaction{}
+	out, err := c.Run(makeInputWithWfID(0x00, "x", 0, 0))
+	if err != nil || out != nil {
+		t.Fatalf("length 1 should succeed, got %v, %v", out, err)
+	}
+}
+
+func TestParseWorkflowID_LengthMaxAccepted(t *testing.T) {
+	c := &agnt2Interaction{}
+	wf := string(bytes.Repeat([]byte{'a'}, 1024))
+	out, err := c.Run(makeInputWithWfID(0x00, wf, 0, 0))
+	if err != nil || out != nil {
+		t.Fatalf("length 1024 should succeed, got %v, %v", out, err)
+	}
+}
+
+func TestParseWorkflowID_LengthOverMax(t *testing.T) {
+	c := &agnt2Interaction{}
+	wf := string(bytes.Repeat([]byte{'a'}, 1025))
+	out, err := c.Run(makeInputWithWfID(0x00, wf, 0, 0))
+	if !errors.Is(err, ErrAGNT2Reverted) || len(out) == 0 || out[0] != revertWorkflowIDInvalid {
+		t.Fatalf("expected 0x06, got %v", out)
+	}
+}
+
+func TestParseWorkflowID_TooShortForHeader(t *testing.T) {
+	c := &agnt2Interaction{}
+	input := make([]byte, 69)
+	input[0] = 0x00 // version
+	// length field implicitly 0 (all zeroes)
+	out, err := c.Run(input)
+	if !errors.Is(err, ErrAGNT2Reverted) || len(out) == 0 || out[0] != revertWorkflowIDInvalid {
+		t.Fatalf("expected 0x06, got %v", out)
+	}
+}
+
+func TestRequiredGas_InvalidWorkflowID_BaseOnly(t *testing.T) {
+	c := &agnt2Interaction{}
+
+	stepCount := uint32(100)
+
+	// 1. bad-offset
+	badOffset := makeInputWithWfID(0x00, "test", stepCount, int(stepCount)*int(agnt2LeafSize))
+	badOffset[36] = 0x40
+
+	// 2. empty workflow_id
+	emptyWf := makeInputWithWfID(0x00, "", stepCount, int(stepCount)*int(agnt2LeafSize))
+
+	// 3. oversized workflow_id
+	oversizedWf := makeInputWithWfID(0x00, string(bytes.Repeat([]byte{'a'}, 1025)), stepCount, int(stepCount)*int(agnt2LeafSize))
+
+	rejecting := [][]byte{badOffset, emptyWf, oversizedWf}
+
+	for _, in := range rejecting {
+		gas := c.RequiredGas(in)
+		if gas != params.AGNT2BaseGas {
+			t.Fatalf("RequiredGas charged %d (> base %d) for parseWorkflowID rejection", gas, params.AGNT2BaseGas)
+		}
 	}
 }
 
@@ -259,8 +322,8 @@ func TestRequiredGas_Run_NoOvercharge(t *testing.T) {
 	c := &agnt2Interaction{}
 	rejecting := [][]byte{
 		{},
-		{0x00, 0x00, 0x00, 0x00},                       // < 5 bytes
-		makeInput(0x01, 1000, 160000),                  // bad version
+		{0x00, 0x00, 0x00, 0x00},      // < 5 bytes
+		makeInput(0x01, 1000, 160000), // bad version
 		makeInput(0x00, uint32(maxSafeLeafCount+1), 0), // overflow
 		makeInput(0x00, 1000, 0),                       // length-grief: declared 1000 steps, no body
 		makeInput(0x00, 1, 159),                        // length-grief: short body

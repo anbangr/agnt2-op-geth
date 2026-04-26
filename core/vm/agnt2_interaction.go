@@ -28,7 +28,7 @@ const (
 )
 
 const (
-	agnt2LeafSize   uint64 = 160
+	agnt2LeafSize uint64 = 160
 	// maxSafeLeafCount = floor((2^32 - 1) / 160) = 26_843_545.
 	// Pinned as an explicit literal (not a derivation) so a future change to
 	// agnt2LeafSize can't silently shift the bound and mask a regression in
@@ -182,19 +182,16 @@ func (c *agnt2Interaction) Run(input []byte) ([]byte, error) {
 	}
 
 	// TODO Week 10 — replace the stepCount>0 revert above with full integration:
-	//   1. Parse the ABI-encoded workflow_id starting at byte 5; let wfBytes
-	//      be its decoded length. Recompute expectedLen = 5 + wfBytes +
-	//      stepCount*agnt2LeafSize and re-validate.
-	//   2. For each leaf, verify leaf.workflowIdHash == keccak256(workflow_id)
-	//      so a caller cannot pack leaves for workflow A under calldata
-	//      claiming workflow B.
-	//   3. Verify the prevLeafHash chain: leaf[i].prevLeafHash ==
-	//      leafHash(leaf[i-1]), zero for i==0. A broken chain means the
-	//      Week 10 commit would derive a root the verifier cannot match.
-	//   4. Shadow-copy the MMR trie, append all leaves in topological order,
-	//      commit only after every leaf write succeeds.
-	//   5. Update the L2 block header interaction root.
-	//   6. On any failure: return []byte{0x04}, ErrAGNT2Reverted.
+	//   - Phase 3 (Workflow binding): For each leaf, verify leaf.workflowIdHash ==
+	//     keccak256(workflow_id) so a caller cannot pack leaves for workflow A
+	//     under calldata claiming workflow B.
+	//   - Phase 4 (prevLeafHash chain validation): Verify leaf[i].prevLeafHash ==
+	//     leafHash(leaf[i-1]), zero for i==0. A broken chain means the commit
+	//     would derive a root the verifier cannot match.
+	//   - Phase 5 (MMR shadow-copy commit): Shadow-copy the MMR trie, append all
+	//     leaves in topological order, commit only after every leaf write succeeds.
+	//   - Phase 6 (Block-header root): Update the L2 block header interaction root.
+	//   - On any failure (Phase 5+): return []byte{0x04}, ErrAGNT2Reverted.
 	// Forward-compatibility: Week 9 accepts calldata where bytes
 	// 5..(5+stepCount*160) are raw leaves with no preceding workflow_id ABI
 	// string. Week 10 will reject those — agnt2_interaction_test.go locks the
