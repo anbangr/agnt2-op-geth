@@ -14,7 +14,7 @@ type noopPrecompile struct{}
 
 func (noopPrecompile) Run(input []byte) ([]byte, error) {
 	if len(input) < 5 {
-		return []byte{0x02}, ErrAGNT2Reverted
+		return []byte{0x02}, ErrExecutionReverted
 	}
 	return nil, nil
 }

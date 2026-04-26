@@ -119,8 +119,8 @@ func TestParseWorkflowID_Valid(t *testing.T) {
 func TestParseWorkflowID_EmptyRejected(t *testing.T) {
 	c := &agnt2Interaction{}
 	out, err := c.Run(makeInputWithWfID(0x00, "", 1, int(agnt2LeafSize)))
-	if !errors.Is(err, ErrAGNT2Reverted) {
-		t.Fatalf("expected ErrAGNT2Reverted, got %v", err)
+	if !errors.Is(err, ErrExecutionReverted) {
+		t.Fatalf("expected ErrExecutionReverted, got %v", err)
 	}
 	if len(out) != 1 || out[0] != revertWorkflowIDInvalid {
 		t.Fatalf("expected 0x06, got %v", out)
@@ -132,7 +132,7 @@ func TestParseWorkflowID_BadOffset(t *testing.T) {
 	input := makeInputWithWfID(0x00, "test", 1, int(agnt2LeafSize))
 	input[36] = 0x40 // Corrupt offset
 	out, err := c.Run(input)
-	if !errors.Is(err, ErrAGNT2Reverted) || out[0] != revertWorkflowIDInvalid {
+	if !errors.Is(err, ErrExecutionReverted) || out[0] != revertWorkflowIDInvalid {
 		t.Fatalf("expected 0x06, got %v", out)
 	}
 }
@@ -142,7 +142,7 @@ func TestParseWorkflowID_LengthTooBig(t *testing.T) {
 	input := makeInputWithWfID(0x00, "test", 1, int(agnt2LeafSize))
 	binary.BigEndian.PutUint32(input[65:69], maxWorkflowIDLen+1) // Corrupt length
 	out, err := c.Run(input)
-	if !errors.Is(err, ErrAGNT2Reverted) || out[0] != revertWorkflowIDInvalid {
+	if !errors.Is(err, ErrExecutionReverted) || out[0] != revertWorkflowIDInvalid {
 		t.Fatalf("expected 0x06, got %v", out)
 	}
 }
@@ -152,7 +152,7 @@ func TestParseWorkflowID_NonZeroPadding(t *testing.T) {
 	input := makeInputWithWfID(0x00, "test", 1, int(agnt2LeafSize))
 	input[69+4] = 0xFF // Corrupt padding
 	out, err := c.Run(input)
-	if !errors.Is(err, ErrAGNT2Reverted) || out[0] != revertWorkflowIDInvalid {
+	if !errors.Is(err, ErrExecutionReverted) || out[0] != revertWorkflowIDInvalid {
 		t.Fatalf("expected 0x06, got %v", out)
 	}
 }
@@ -162,7 +162,7 @@ func TestParseWorkflowID_TrailingBytes(t *testing.T) {
 	input := makeInputWithWfID(0x00, "test", 1, int(agnt2LeafSize))
 	input = append(input, 0x00) // extra byte
 	out, err := c.Run(input)
-	if !errors.Is(err, ErrAGNT2Reverted) || out[0] != revertMalformedCalldata {
+	if !errors.Is(err, ErrExecutionReverted) || out[0] != revertMalformedCalldata {
 		t.Fatalf("expected 0x02, got %v", out)
 	}
 }
@@ -196,7 +196,7 @@ func TestParseWorkflowID_LengthOverMax(t *testing.T) {
 	c := &agnt2Interaction{}
 	wf := string(bytes.Repeat([]byte{'a'}, 1025))
 	out, err := c.Run(makeInputWithWfID(0x00, wf, 0, 0))
-	if !errors.Is(err, ErrAGNT2Reverted) || len(out) == 0 || out[0] != revertWorkflowIDInvalid {
+	if !errors.Is(err, ErrExecutionReverted) || len(out) == 0 || out[0] != revertWorkflowIDInvalid {
 		t.Fatalf("expected 0x06, got %v", out)
 	}
 }
@@ -207,7 +207,7 @@ func TestParseWorkflowID_TooShortForHeader(t *testing.T) {
 	input[0] = 0x00 // version
 	// length field implicitly 0 (all zeroes)
 	out, err := c.Run(input)
-	if !errors.Is(err, ErrAGNT2Reverted) || len(out) == 0 || out[0] != revertWorkflowIDInvalid {
+	if !errors.Is(err, ErrExecutionReverted) || len(out) == 0 || out[0] != revertWorkflowIDInvalid {
 		t.Fatalf("expected 0x06, got %v", out)
 	}
 }
@@ -326,8 +326,8 @@ func TestRun_ChainBrokenAtFirst(t *testing.T) {
 	leaves := makeChainedLeaves(expectedHash, 1)
 	leaves[160-1] = 0xFF // corrupt prevLeafHash of leaf[0]
 	out, err := c.Run(makeInputWithLeaves(wfID, leaves))
-	if !errors.Is(err, ErrAGNT2Reverted) {
-		t.Fatalf("expected ErrAGNT2Reverted, got %v", err)
+	if !errors.Is(err, ErrExecutionReverted) {
+		t.Fatalf("expected ErrExecutionReverted, got %v", err)
 	}
 	if len(out) != 1 || out[0] != revertLeafChainBroken {
 		t.Fatalf("expected revertLeafChainBroken (0x08), got %v", out)
@@ -341,8 +341,8 @@ func TestRun_ChainBrokenAtMiddle(t *testing.T) {
 	leaves := makeChainedLeaves(expectedHash, 3)
 	leaves[160+160-1] = 0xFF // corrupt prevLeafHash of leaf[1]
 	out, err := c.Run(makeInputWithLeaves(wfID, leaves))
-	if !errors.Is(err, ErrAGNT2Reverted) {
-		t.Fatalf("expected ErrAGNT2Reverted, got %v", err)
+	if !errors.Is(err, ErrExecutionReverted) {
+		t.Fatalf("expected ErrExecutionReverted, got %v", err)
 	}
 	if len(out) != 1 || out[0] != revertLeafChainBroken {
 		t.Fatalf("expected revertLeafChainBroken (0x08), got %v", out)
@@ -356,8 +356,8 @@ func TestRun_ChainBrokenAtLast(t *testing.T) {
 	leaves := makeChainedLeaves(expectedHash, 3)
 	leaves[2*160+160-1] = 0xFF // corrupt prevLeafHash of leaf[2]
 	out, err := c.Run(makeInputWithLeaves(wfID, leaves))
-	if !errors.Is(err, ErrAGNT2Reverted) {
-		t.Fatalf("expected ErrAGNT2Reverted, got %v", err)
+	if !errors.Is(err, ErrExecutionReverted) {
+		t.Fatalf("expected ErrExecutionReverted, got %v", err)
 	}
 	if len(out) != 1 || out[0] != revertLeafChainBroken {
 		t.Fatalf("expected revertLeafChainBroken (0x08), got %v", out)
@@ -372,8 +372,8 @@ func TestRun_BindingPrecedesChain(t *testing.T) {
 	leaves[0] ^= 0xFF    // corrupt workflowIdHash -> binding mismatch
 	leaves[160-1] = 0xFF // corrupt prevLeafHash -> chain broken
 	out, err := c.Run(makeInputWithLeaves(wfID, leaves))
-	if !errors.Is(err, ErrAGNT2Reverted) {
-		t.Fatalf("expected ErrAGNT2Reverted, got %v", err)
+	if !errors.Is(err, ErrExecutionReverted) {
+		t.Fatalf("expected ErrExecutionReverted, got %v", err)
 	}
 	if len(out) != 1 || out[0] != revertWorkflowBindingMismatch {
 		t.Fatalf("expected revertWorkflowBindingMismatch (0x07), got %v", out)
@@ -388,8 +388,8 @@ func TestRun_WorkflowBindingMismatch_FirstLeaf(t *testing.T) {
 	leaves := makeChainedLeaves(expectedHash, 1)
 	copy(leaves[0:32], wrongHash)
 	out, err := c.Run(makeInputWithLeaves(wfID, leaves))
-	if !errors.Is(err, ErrAGNT2Reverted) {
-		t.Fatalf("expected ErrAGNT2Reverted, got %v", err)
+	if !errors.Is(err, ErrExecutionReverted) {
+		t.Fatalf("expected ErrExecutionReverted, got %v", err)
 	}
 	if len(out) != 1 || out[0] != revertWorkflowBindingMismatch {
 		t.Fatalf("expected revertWorkflowBindingMismatch (0x07), got %v", out)
@@ -404,8 +404,8 @@ func TestRun_WorkflowBindingMismatch_LastLeaf(t *testing.T) {
 	leaves := makeChainedLeaves(expectedHash, 3)
 	copy(leaves[2*160:2*160+32], wrongHash)
 	out, err := c.Run(makeInputWithLeaves(wfID, leaves))
-	if !errors.Is(err, ErrAGNT2Reverted) {
-		t.Fatalf("expected ErrAGNT2Reverted, got %v", err)
+	if !errors.Is(err, ErrExecutionReverted) {
+		t.Fatalf("expected ErrExecutionReverted, got %v", err)
 	}
 	if len(out) != 1 || out[0] != revertWorkflowBindingMismatch {
 		t.Fatalf("expected revertWorkflowBindingMismatch (0x07), got %v", out)
@@ -420,8 +420,8 @@ func TestRun_WorkflowBindingMismatch_MiddleLeaf(t *testing.T) {
 	leaves := makeChainedLeaves(expectedHash, 3)
 	copy(leaves[160:160+32], wrongHash)
 	out, err := c.Run(makeInputWithLeaves(wfID, leaves))
-	if !errors.Is(err, ErrAGNT2Reverted) {
-		t.Fatalf("expected ErrAGNT2Reverted, got %v", err)
+	if !errors.Is(err, ErrExecutionReverted) {
+		t.Fatalf("expected ErrExecutionReverted, got %v", err)
 	}
 	if len(out) != 1 || out[0] != revertWorkflowBindingMismatch {
 		t.Fatalf("expected revertWorkflowBindingMismatch (0x07), got %v", out)
@@ -468,8 +468,8 @@ func TestRun_RevertCodes(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			out, err := c.Run(tc.input)
-			if !errors.Is(err, ErrAGNT2Reverted) {
-				t.Fatalf("expected ErrAGNT2Reverted; got %v", err)
+			if !errors.Is(err, ErrExecutionReverted) {
+				t.Fatalf("expected ErrExecutionReverted; got %v", err)
 			}
 			if len(out) != 1 || out[0] != tc.wantCode {
 				t.Fatalf("expected revert code 0x%02x; got %v", tc.wantCode, out)
@@ -483,8 +483,8 @@ func TestRun_StepOverflow(t *testing.T) {
 	overflow := uint32(maxSafeLeafCount + 1)
 	input := makeInput(0x00, overflow, 0)
 	out, err := c.Run(input)
-	if !errors.Is(err, ErrAGNT2Reverted) {
-		t.Fatalf("expected ErrAGNT2Reverted; got %v", err)
+	if !errors.Is(err, ErrExecutionReverted) {
+		t.Fatalf("expected ErrExecutionReverted; got %v", err)
 	}
 	if len(out) != 1 || out[0] != revertStepOverflow {
 		t.Fatalf("expected revertStepOverflow; got 0x%02x", out[0])
@@ -498,8 +498,8 @@ func TestRun_BoundaryAtMaxSafeLeafCount(t *testing.T) {
 	atMax := uint32(maxSafeLeafCount)
 	input := makeInput(0x00, atMax, 0)
 	out, err := c.Run(input)
-	if !errors.Is(err, ErrAGNT2Reverted) {
-		t.Fatalf("expected ErrAGNT2Reverted; got %v", err)
+	if !errors.Is(err, ErrExecutionReverted) {
+		t.Fatalf("expected ErrExecutionReverted; got %v", err)
 	}
 	if len(out) != 1 || out[0] != revertMalformedCalldata {
 		t.Fatalf("at maxSafeLeafCount, expected revertMalformedCalldata; got 0x%02x", out[0])
@@ -1087,8 +1087,8 @@ func TestLeafEvents_FailedRunHasNoEvents(t *testing.T) {
 
 	input := makeInputWithLeaves(wfID, leaves)
 	_, err := c.Run(input)
-	if !errors.Is(err, ErrAGNT2Reverted) {
-		t.Fatalf("expected ErrAGNT2Reverted, got %v", err)
+	if !errors.Is(err, ErrExecutionReverted) {
+		t.Fatalf("expected ErrExecutionReverted, got %v", err)
 	}
 
 	events := LastEmittedEvents()

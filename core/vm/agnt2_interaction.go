@@ -3,7 +3,6 @@ package vm
 import (
 	"bytes"
 	"encoding/binary"
-	"errors"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -34,16 +33,18 @@ func init() {
 	PrecompiledContractsJovian[AGNT2InteractionPrecompileAddress] = &agnt2Interaction{}
 }
 
-// ErrAGNT2Reverted is the sentinel returned alongside a one-byte error code.
-// Per ADR 002 the EVM must treat failures as transaction reverts with the byte
-// as return data. When this scaffold is wired into the active op-geth precompile
-// registry (Week 10), the dispatch layer maps ErrAGNT2Reverted to
-// vm.ErrExecutionReverted so the byte payload becomes EVM return data.
-// Returning any non-nil error here guarantees the call fails per standard
-// go-ethereum precompile semantics instead of silently succeeding.
-var ErrAGNT2Reverted = errors.New("AGNT2: reverted")
+// Run() now returns vm.ErrExecutionReverted directly (Week 11 Phase 2). The
+// EVM at evm.go:331 uses `err == ErrExecutionReverted` direct equality (not
+// errors.Is) to decide between gas-refund-on-revert and all-gas-consumed —
+// any wrapping or substitution would silently flip AGNT2 reverts back to
+// "all gas consumed" and break the documented ADR 002 §Revert Error Codes
+// contract that callers see the byte payload as EVM return data with their
+// remaining gas refunded.
+//
+// ErrAGNT2Reverted (the prior internal sentinel) is removed; tests now
+// assert against ErrExecutionReverted directly.
 
-// Revert codes returned alongside ErrAGNT2Reverted. Order is locked by ADR 002
+// Revert codes returned alongside ErrExecutionReverted. Order is locked by ADR 002
 // and the on-chain decoder; renumbering is a breaking change.
 const (
 	revertInvalidVersion          byte = 0x01 // byte 0 is not 0x00
@@ -204,21 +205,21 @@ func validateAndBuildMMR(input []byte, stepCount uint64, abiHeaderSize uint64, w
 
 func (c *agnt2Interaction) Run(input []byte) ([]byte, error) {
 	if len(input) < 5 {
-		return []byte{revertMalformedCalldata}, ErrAGNT2Reverted
+		return []byte{revertMalformedCalldata}, ErrExecutionReverted
 	}
 
 	if input[0] != 0x00 {
-		return []byte{revertInvalidVersion}, ErrAGNT2Reverted
+		return []byte{revertInvalidVersion}, ErrExecutionReverted
 	}
 
 	stepCount := uint64(binary.BigEndian.Uint32(input[1:5]))
 	if stepCount > maxSafeLeafCount {
-		return []byte{revertStepOverflow}, ErrAGNT2Reverted
+		return []byte{revertStepOverflow}, ErrExecutionReverted
 	}
 
 	workflowID, abiHeaderSize, errCode := parseWorkflowID(input)
 	if errCode != 0 {
-		return []byte{errCode}, ErrAGNT2Reverted
+		return []byte{errCode}, ErrExecutionReverted
 	}
 
 	// uint64 math throughout. On 32-bit Go builds, int(stepCount)*160 silently
@@ -233,12 +234,12 @@ func (c *agnt2Interaction) Run(input []byte) ([]byte, error) {
 	// includes the parsed string size.
 	expectedLen := uint64(5) + abiHeaderSize + stepCount*agnt2LeafSize
 	if uint64(len(input)) != expectedLen {
-		return []byte{revertMalformedCalldata}, ErrAGNT2Reverted
+		return []byte{revertMalformedCalldata}, ErrExecutionReverted
 	}
 
 	root, events, errCode := validateAndBuildMMR(input, stepCount, abiHeaderSize, workflowID)
 	if errCode != 0 {
-		return []byte{errCode}, ErrAGNT2Reverted
+		return []byte{errCode}, ErrExecutionReverted
 	}
 	// Phase 6 — publish root via native hook for op-node consumption.
 	globalAgnt2RootStore.put(root)

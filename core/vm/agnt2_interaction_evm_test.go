@@ -160,10 +160,14 @@ func TestAgnt2Dispatch_HappyPath_1Step(t *testing.T) {
 }
 
 // TestAgnt2Dispatch_RevertOnBadVersion proves that a malformed call
-// produces the expected revert byte AND ErrAGNT2Reverted at the dispatch
-// boundary. Phase 2 will translate ErrAGNT2Reverted to ErrExecutionReverted
-// at the dispatch layer; this test pins the current behavior so Phase 2's
-// translation is observable.
+// produces ErrExecutionReverted (NOT a custom AGNT2 sentinel) at the
+// dispatch boundary. Direct equality against ErrExecutionReverted is what
+// op-geth's evm.go:331 checks to decide gas-refund-on-revert vs all-gas-
+// consumed; any other error from a precompile triggers the all-gas branch.
+//
+// Asserts: (a) err IS the ErrExecutionReverted sentinel (direct equality,
+// not errors.Is — that's what the EVM uses), (b) the revert byte is the
+// first byte of returnData (ADR 002 §Revert Error Codes contract).
 func TestAgnt2Dispatch_RevertOnBadVersion(t *testing.T) {
 	t.Cleanup(globalAgnt2EventStore.reset)
 	globalAgnt2EventStore.reset()
@@ -172,12 +176,20 @@ func TestAgnt2Dispatch_RevertOnBadVersion(t *testing.T) {
 	p := PrecompiledContractsJovian[AGNT2InteractionPrecompileAddress]
 	badInput := makeInput(0x01, 1, 160) // version 0x01 (must be 0x00)
 
-	ret, _, err := RunPrecompiledContract(nil, p, AGNT2InteractionPrecompileAddress, badInput, 1_000_000, nil)
-	if !errors.Is(err, ErrAGNT2Reverted) {
-		t.Fatalf("expected ErrAGNT2Reverted, got %v", err)
+	ret, remainingGas, err := RunPrecompiledContract(nil, p, AGNT2InteractionPrecompileAddress, badInput, 1_000_000, nil)
+	if err != ErrExecutionReverted {
+		t.Fatalf("Phase 2 contract: expected vm.ErrExecutionReverted (direct ==), got %v", err)
 	}
 	if len(ret) != 1 || ret[0] != revertInvalidVersion {
 		t.Fatalf("expected revert byte 0x%02x, got %x", revertInvalidVersion, ret)
+	}
+	// Gas accounting on revert: caller's remainingGas is preserved minus the
+	// already-charged RequiredGas (the EVM refunds whatever didn't reach Run's
+	// internal work). Bad-version is a syntactic check that bills only the
+	// base gas + 1*per-step-gas via RequiredGas (mirrors Run's input shape).
+	expectedCharged := p.RequiredGas(badInput)
+	if got := uint64(1_000_000) - remainingGas; got != expectedCharged {
+		t.Fatalf("revert gas charged %d, want %d (RequiredGas only — no all-gas-consumed)", got, expectedCharged)
 	}
 }
 
