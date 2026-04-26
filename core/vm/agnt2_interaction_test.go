@@ -468,8 +468,13 @@ func TestRun_RevertCodes(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			out, err := c.Run(tc.input)
-			if !errors.Is(err, ErrExecutionReverted) {
-				t.Fatalf("expected ErrExecutionReverted; got %v", err)
+			// Direct equality (not errors.Is) — this is what op-geth's evm.go:331
+			// uses to decide gas-refund-on-revert vs all-gas-consumed. Wrapping
+			// would silently flip the contract documented in this file's revert
+			// codes table; pinning direct equality here is the load-bearing
+			// guard for ADR 002 §Revert Error Codes.
+			if err != ErrExecutionReverted {
+				t.Fatalf("expected vm.ErrExecutionReverted (direct ==); got %v", err)
 			}
 			if len(out) != 1 || out[0] != tc.wantCode {
 				t.Fatalf("expected revert code 0x%02x; got %v", tc.wantCode, out)
