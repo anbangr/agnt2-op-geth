@@ -1,9 +1,11 @@
 package vm
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/params"
 )
 
@@ -19,12 +21,13 @@ var ErrAGNT2Reverted = errors.New("AGNT2: reverted")
 // Revert codes returned alongside ErrAGNT2Reverted. Order is locked by ADR 002
 // and the on-chain decoder; renumbering is a breaking change.
 const (
-	revertInvalidVersion    byte = 0x01 // byte 0 is not 0x00
-	revertMalformedCalldata byte = 0x02 // total length is inconsistent with step_count
-	revertStepOverflow      byte = 0x03 // step_count * 160 exceeds the calldata size limit
-	revertTrieWriteFailed   byte = 0x04 // MMR leaf write failed (Week 10 only)
-	revertNotImplemented    byte = 0x05 // stepCount > 0 in Week 9 — MMR writer is Week 10 scope
-	revertWorkflowIDInvalid byte = 0x06 // workflow_id parsing failed (offset, length, padding, range)
+	revertInvalidVersion          byte = 0x01 // byte 0 is not 0x00
+	revertMalformedCalldata       byte = 0x02 // total length is inconsistent with step_count
+	revertStepOverflow            byte = 0x03 // step_count * 160 exceeds the calldata size limit
+	revertTrieWriteFailed         byte = 0x04 // MMR leaf write failed (Week 10 only)
+	revertNotImplemented          byte = 0x05 // stepCount > 0 in Week 9 — MMR writer is Week 10 scope
+	revertWorkflowIDInvalid       byte = 0x06 // workflow_id parsing failed (offset, length, padding, range)
+	revertWorkflowBindingMismatch byte = 0x07 // leaf.workflowIdHash != keccak256(workflow_id)
 )
 
 const (
@@ -146,7 +149,6 @@ func (c *agnt2Interaction) Run(input []byte) ([]byte, error) {
 	if errCode != 0 {
 		return []byte{errCode}, ErrAGNT2Reverted
 	}
-	_ = workflowID // forward compatibility for Phase 3
 
 	// uint64 math throughout. On 32-bit Go builds, int(stepCount)*160 silently
 	// overflows when stepCount > int32-max / agnt2LeafSize ≈ 13_421_772, even
@@ -161,6 +163,23 @@ func (c *agnt2Interaction) Run(input []byte) ([]byte, error) {
 	expectedLen := uint64(5) + abiHeaderSize + stepCount*agnt2LeafSize
 	if uint64(len(input)) != expectedLen {
 		return []byte{revertMalformedCalldata}, ErrAGNT2Reverted
+	}
+
+	// Phase 3 — Workflow binding check (ADR 002 §Week-10-Scope item 2).
+	// For each leaf, verify the first 32 bytes (workflowIdHash field) match
+	// keccak256(workflow_id). Without this, a caller could pack leaves for
+	// workflow A under calldata claiming workflow B. The binding must be
+	// enforced for stepCount > 0; for stepCount == 0 there are no leaves.
+	if stepCount > 0 {
+		expectedWfHash := crypto.Keccak256(workflowID)
+		leavesStart := uint64(5) + abiHeaderSize
+		for i := uint64(0); i < stepCount; i++ {
+			leafStart := leavesStart + i*agnt2LeafSize
+			leafWfHash := input[leafStart : leafStart+32]
+			if !bytes.Equal(leafWfHash, expectedWfHash) {
+				return []byte{revertWorkflowBindingMismatch}, ErrAGNT2Reverted
+			}
+		}
 	}
 
 	// Week 9 trust boundary: validation passed but the MMR writer is Week 10
@@ -182,9 +201,6 @@ func (c *agnt2Interaction) Run(input []byte) ([]byte, error) {
 	}
 
 	// TODO Week 10 — replace the stepCount>0 revert above with full integration:
-	//   - Phase 3 (Workflow binding): For each leaf, verify leaf.workflowIdHash ==
-	//     keccak256(workflow_id) so a caller cannot pack leaves for workflow A
-	//     under calldata claiming workflow B.
 	//   - Phase 4 (prevLeafHash chain validation): Verify leaf[i].prevLeafHash ==
 	//     leafHash(leaf[i-1]), zero for i==0. A broken chain means the commit
 	//     would derive a root the verifier cannot match.
