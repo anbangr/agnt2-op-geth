@@ -185,8 +185,9 @@ func TestAgnt2Dispatch_RevertOnBadVersion(t *testing.T) {
 	}
 	// Gas accounting on revert: caller's remainingGas is preserved minus the
 	// already-charged RequiredGas (the EVM refunds whatever didn't reach Run's
-	// internal work). Bad-version is a syntactic check that bills only the
-	// base gas + 1*per-step-gas via RequiredGas (mirrors Run's input shape).
+	// internal work). Bad-version is a syntactic check, so RequiredGas returns
+	// base gas only — this assertion proves that's what the dispatch wrapper
+	// actually billed (NOT all-gas-consumed).
 	expectedCharged := p.RequiredGas(badInput)
 	if got := uint64(1_000_000) - remainingGas; got != expectedCharged {
 		t.Fatalf("revert gas charged %d, want %d (RequiredGas only — no all-gas-consumed)", got, expectedCharged)
