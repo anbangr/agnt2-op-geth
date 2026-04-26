@@ -1,12 +1,12 @@
 package vm
 
 import (
-	"bytes"
-	"encoding/binary"
-	"encoding/hex"
-	"errors"
-	"testing"
-
+        "bytes"
+        "encoding/binary"
+        "encoding/hex"
+        "errors"
+        "sync"
+        "testing"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/params"
 )
@@ -787,6 +787,129 @@ func TestAgnt2MMR_BuildTreeMatches_TS(t *testing.T) {
 	copy(expectedRoot[:], crypto.Keccak256(final_combined[:]))
 
 	if !bytes.Equal(root[:], expectedRoot[:]) {
-		t.Fatalf("build tree fold mismatch: want %x, got %x", expectedRoot, root)
+	        t.Fatalf("build tree fold mismatch: want %x, got %x", expectedRoot, root)
 	}
-}
+	}
+
+	// --- Root Hook Phase 6 Tests ---
+
+	func TestRootHook_v1_3step_PublishedAfterRun(t *testing.T) {
+	wfID := "test-wf-001"
+	steps := []struct {
+	        stepID, agentRole string
+	        payout            uint64
+	}{
+	        {"step-1", "worker-a", 1000},
+	        {"step-2", "worker-b", 2000},
+	        {"step-3", "worker-c", 3000},
+	}
+	leavesBytes := makeCanonicalChain(wfID, steps)
+	var flat []byte
+	for _, l := range leavesBytes {
+	        flat = append(flat, l...)
+	}
+
+	input := makeInputWithLeaves(wfID, flat)
+	c := &agnt2Interaction{}
+
+	_, err := c.Run(input)
+	if err != nil {
+	        t.Fatalf("Run rejected canonical v1_3step calldata")
+	}
+
+	root, set := GetInteractionRoot()
+	if !set {
+	        t.Fatalf("GetInteractionRoot() returned set=false after successful Run")
+	}
+
+	expectedBytes, _ := hex.DecodeString("d54c19717603e20fbf82ff44e90eafd7d1ad14ef4d7811f8802cc3c078cc86c3")
+	var expected [32]byte
+	copy(expected[:], expectedBytes)
+
+	if !bytes.Equal(root[:], expected[:]) {
+	        t.Fatalf("Root hook MMR mismatch: want %x, got %x", expected, root)
+	}
+	}
+
+	func TestRootHook_v4_5step_PublishedAfterRun(t *testing.T) {
+	wfID := "test-wf-005"
+	steps := []struct {
+	        stepID, agentRole string
+	        payout            uint64
+	}{
+	        {"step-1", "worker-a", 1000},
+	        {"step-2", "worker-b", 2000},
+	        {"step-3", "worker-c", 3000},
+	        {"step-4", "worker-d", 4000},
+	        {"step-5", "worker-e", 5000},
+	}
+	leavesBytes := makeCanonicalChain(wfID, steps)
+	var flat []byte
+	for _, l := range leavesBytes {
+	        flat = append(flat, l...)
+	}
+
+	input := makeInputWithLeaves(wfID, flat)
+	c := &agnt2Interaction{}
+
+	_, err := c.Run(input)
+	if err != nil {
+	        t.Fatalf("Run rejected canonical v4_5step calldata")
+	}
+
+	root, set := GetInteractionRoot()
+	if !set {
+	        t.Fatalf("GetInteractionRoot() returned set=false after successful Run")
+	}
+
+	expectedBytes, _ := hex.DecodeString("e34cda67eaf574138a02ab6ea87fd1ec55f8e3c09545f2c7c44edb8365316c91")
+	var expected [32]byte
+	copy(expected[:], expectedBytes)
+
+	if !bytes.Equal(root[:], expected[:]) {
+	        t.Fatalf("Root hook MMR mismatch: want %x, got %x", expected, root)
+	}
+	}
+
+	func TestRootHook_NotSetUntilFirstRun(t *testing.T) {
+	store := &agnt2RootStore{}
+	_, set := store.get()
+	if set {
+	        t.Fatalf("fresh store should report set=false")
+	}
+	}
+
+	func TestRootHook_FailedRunDoesNotUpdate(t *testing.T) {
+	// Record current global state
+	beforeRoot, beforeSet := GetInteractionRoot()
+
+	// Make a failing run call
+	c := &agnt2Interaction{}
+	// Bad version byte
+	input := makeInput(0x01, 1000, 160000)
+	c.Run(input)
+
+	afterRoot, afterSet := GetInteractionRoot()
+	if beforeSet != afterSet || !bytes.Equal(beforeRoot[:], afterRoot[:]) {
+	        t.Fatalf("Failed Run altered the global root store state. Before: %x (%v), After: %x (%v)", beforeRoot, beforeSet, afterRoot, afterSet)
+	}
+	}
+
+	func TestRootHook_Concurrency(t *testing.T) {
+	var wg sync.WaitGroup
+	wfID := "test-wf-001"
+	expectedHash := crypto.Keccak256([]byte(wfID))
+	leaves := makeChainedLeaves(expectedHash, 1)
+	input := makeInputWithLeaves(wfID, leaves)
+	c := &agnt2Interaction{}
+
+	for i := 0; i < 10; i++ {
+	        wg.Add(1)
+	        go func() {
+	                defer wg.Done()
+	                c.Run(input)
+	                GetInteractionRoot()
+	        }()
+	}
+	wg.Wait()
+	}

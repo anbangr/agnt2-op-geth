@@ -190,7 +190,8 @@ func (c *agnt2Interaction) Run(input []byte) ([]byte, error) {
 	if errCode != 0 {
 		return []byte{errCode}, ErrAGNT2Reverted
 	}
-	_ = root // Phase 6 will wire the native hook here
+	// Phase 6 — publish root via native hook for op-node consumption.
+	GlobalAgnt2RootStore.put(root)
 
 	return nil, nil
 }
