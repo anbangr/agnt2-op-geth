@@ -163,6 +163,17 @@ func (v *BlockValidator) ValidateState(block *types.Block, statedb *state.StateD
 	if rbloom != header.Bloom {
 		return fmt.Errorf("invalid bloom (remote: %x  local: %x)", header.Bloom, rbloom)
 	}
+	// AGNT2 Week 11 Phase 7: validate the interaction MMR root + leaf count
+	// declared in the header against the receipt-derived fold. Runs BEFORE the
+	// stateless early-return — receipts cross-check is a consensus rule that
+	// applies to both full and stateless paths. Without this ordering, a
+	// malicious sequencer could forge the InteractionRoot and pass the
+	// stateless fault-proof validation path (Codex Phase 6+7 review #1, P1).
+	// Logic lives in validateAGNT2InteractionFields so it can be unit-tested
+	// in isolation from the full ValidateState scaffolding.
+	if err := validateAGNT2InteractionFields(header, res.Receipts); err != nil {
+		return err
+	}
 	// In stateless mode, return early because the receipt and state root are not
 	// provided through the witness, rather the cross validator needs to return it.
 	if stateless {
@@ -195,14 +206,6 @@ func (v *BlockValidator) ValidateState(block *types.Block, statedb *state.StateD
 		if root := statedb.GetStorageRoot(params.OptimismL2ToL1MessagePasser); *header.WithdrawalsHash != root {
 			return fmt.Errorf("invalid withdrawals hash (remote: %s local: %s) dberr: %w", *header.WithdrawalsHash, root, statedb.Error())
 		}
-	}
-	// AGNT2 Week 11 Phase 7: validate the interaction MMR root + leaf count
-	// declared in the header against the receipt-derived fold. Logic lives
-	// in validateAGNT2InteractionFields so it can be unit-tested in
-	// isolation from the full ValidateState scaffolding (which needs a
-	// statedb + ProcessResult).
-	if err := validateAGNT2InteractionFields(header, res.Receipts); err != nil {
-		return err
 	}
 	return nil
 }
