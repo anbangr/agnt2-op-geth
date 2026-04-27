@@ -1109,6 +1109,13 @@ func RPCMarshalHeader(head *types.Header) map[string]interface{} {
 	if head.SlotNumber != nil {
 		result["slotNumber"] = hexutil.Uint64(*head.SlotNumber)
 	}
+	// AGNT2 Week 11 Phase 7: expose MMR root + leaf count for off-chain verification.
+	if head.InteractionRoot != nil {
+		result["interactionRoot"] = head.InteractionRoot
+	}
+	if head.InteractionCount != nil {
+		result["interactionCount"] = hexutil.Uint64(*head.InteractionCount)
+	}
 	return result
 }
 
