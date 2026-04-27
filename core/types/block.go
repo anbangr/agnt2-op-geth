@@ -102,6 +102,21 @@ type Header struct {
 
 	// SlotNumber was added by EIP-7843 and is ignored in legacy headers.
 	SlotNumber *uint64 `json:"slotNumber" rlp:"optional"`
+
+	// InteractionRoot is the AGNT2 MMR root over the block's per-leaf
+	// interaction logs (Week 11 Phase 7). Fork-gated by Optimism Isthmus —
+	// pre-Isthmus headers MUST encode nil and decode any trailing data as
+	// non-existent. Older nodes decode pre-Isthmus headers cleanly via the
+	// rlp:"optional" tag; AGNT2 nodes recompute via FoldInteractionRoot
+	// and reject any block whose sequencer-set value disagrees with the
+	// receipt-derived value.
+	InteractionRoot *common.Hash `json:"interactionRoot" rlp:"optional"`
+
+	// InteractionCount is the leaf count corresponding to InteractionRoot.
+	// Required because a root alone is insufficient for incremental MMR
+	// validation across reorgs — verifiers need leaf count to bind peaks
+	// to a specific MMR shape.
+	InteractionCount *uint64 `json:"interactionCount" rlp:"optional"`
 }
 
 // field type overrides for gencodec
@@ -114,9 +129,10 @@ type headerMarshaling struct {
 	Extra         hexutil.Bytes
 	BaseFee       *hexutil.Big
 	Hash          common.Hash `json:"hash"` // adds call to Hash() in MarshalJSON
-	BlobGasUsed   *hexutil.Uint64
-	ExcessBlobGas *hexutil.Uint64
-	SlotNumber    *hexutil.Uint64
+	BlobGasUsed      *hexutil.Uint64
+	ExcessBlobGas    *hexutil.Uint64
+	SlotNumber       *hexutil.Uint64
+	InteractionCount *hexutil.Uint64
 }
 
 // Hash returns the block hash of the header, which is simply the keccak256 hash of its
@@ -353,6 +369,14 @@ func CopyHeader(h *Header) *Header {
 	if h.SlotNumber != nil {
 		cpy.SlotNumber = new(uint64)
 		*cpy.SlotNumber = *h.SlotNumber
+	}
+	if h.InteractionRoot != nil {
+		cpy.InteractionRoot = new(common.Hash)
+		*cpy.InteractionRoot = *h.InteractionRoot
+	}
+	if h.InteractionCount != nil {
+		cpy.InteractionCount = new(uint64)
+		*cpy.InteractionCount = *h.InteractionCount
 	}
 	return &cpy
 }

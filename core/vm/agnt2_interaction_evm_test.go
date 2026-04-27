@@ -128,8 +128,6 @@ func TestAgnt2Dispatch_HappyPath_1Step(t *testing.T) {
 	} {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			t.Cleanup(globalAgnt2RootStore.reset)
-
 			p, ok := tc.set[AGNT2InteractionPrecompileAddress]
 			if !ok {
 				t.Fatalf("0x0BC2 not registered in %s", tc.name)
@@ -168,8 +166,6 @@ func TestAgnt2Dispatch_HappyPath_1Step(t *testing.T) {
 // not errors.Is — that's what the EVM uses), (b) the revert byte is the
 // first byte of returnData (ADR 002 §Revert Error Codes contract).
 func TestAgnt2Dispatch_RevertOnBadVersion(t *testing.T) {
-	t.Cleanup(globalAgnt2RootStore.reset)
-
 	p := PrecompiledContractsJovian[AGNT2InteractionPrecompileAddress]
 	badInput := makeInput(0x01, 1, 160) // version 0x01 (must be 0x00)
 
@@ -197,8 +193,6 @@ func TestAgnt2Dispatch_RevertOnBadVersion(t *testing.T) {
 // pays nothing at the precompile body and sees the standard EVM out-of-gas
 // signal.
 func TestAgnt2Dispatch_OutOfGas(t *testing.T) {
-	t.Cleanup(globalAgnt2RootStore.reset)
-
 	p := PrecompiledContractsJovian[AGNT2InteractionPrecompileAddress]
 	wfID := "evm-dispatch-oog"
 	expectedHash := crypto.Keccak256([]byte(wfID))
@@ -208,15 +202,13 @@ func TestAgnt2Dispatch_OutOfGas(t *testing.T) {
 	required := params.AGNT2BaseGas + 3*params.AGNT2PerStepGas
 	starved := required - 1
 
-	beforeRoot, beforeSet := GetInteractionRoot()
 	_, _, err := RunPrecompiledContract(nil, p, AGNT2InteractionPrecompileAddress, input, starved, nil)
 	if !errors.Is(err, ErrOutOfGas) {
 		t.Fatalf("expected ErrOutOfGas, got %v", err)
 	}
-	// Run() must NOT have executed — root store remains unchanged from before
-	// the gas-starved attempt.
-	afterRoot, afterSet := GetInteractionRoot()
-	if beforeSet != afterSet || beforeRoot != afterRoot {
-		t.Fatalf("dispatch ran Run() despite OOG (root store mutated)")
-	}
+	// Phase 7: Run() is now stateless (no global root store). The OOG
+	// guarantee remains: when supplied gas < RequiredGas the dispatch
+	// wrapper returns ErrOutOfGas without invoking Run(). Re-asserting
+	// "Run did not mutate state" is no longer meaningful — there is no
+	// state to mutate. The error contract above is the load-bearing check.
 }

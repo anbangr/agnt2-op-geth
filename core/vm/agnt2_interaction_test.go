@@ -877,111 +877,63 @@ func TestAgnt2MMR_BuildTreeMatches_TS(t *testing.T) {
 	}
 }
 
-// --- Root Hook Phase 6 Tests ---
+// --- Root Hook Phase 7 Replacement Tests ---
+//
+// Week 11 Phase 7 removed the package-level globalAgnt2RootStore singleton
+// (Week 10 scaffold) in favour of receipt-derived MMR folds via
+// core/types.FoldInteractionRoot, committed in fork-gated Header fields and
+// validated at block import. The tests below pin the contract that Run()
+// no longer mutates any package-level state, and that successful runs are
+// observable purely via the agnt2ParseLeaves shared helper which both Run
+// and the post-success log dispatcher route through.
 
-func TestRootHook_v1_3step_PublishedAfterRun(t *testing.T) {
-	wfID := "test-wf-001"
-	steps := []struct {
-		stepID, agentRole string
-		payout            uint64
-	}{
-		{"step-1", "worker-a", 1000},
-		{"step-2", "worker-b", 2000},
-		{"step-3", "worker-c", 3000},
-	}
-	leavesBytes := makeCanonicalChain(wfID, steps)
-	var flat []byte
-	for _, l := range leavesBytes {
-		flat = append(flat, l...)
-	}
-
-	input := makeInputWithLeaves(wfID, flat)
+// TestRun_NoPackageLevelStateMutation locks the Phase 7 contract: Run()
+// must produce identical (root, events, errCode) outputs across repeated
+// calls, with no carry-over via globals. Two different workflows give two
+// different roots; Run does not "remember" the previous one. (The Week 10
+// scaffold's TestRootHook_ScaffoldOnly_NotBlockSafe documented exactly the
+// opposite — that scaffold is now gone.)
+func TestRun_NoPackageLevelStateMutation(t *testing.T) {
 	c := &agnt2Interaction{}
+	wfA := "block-a-wf"
+	wfB := "block-b-wf"
 
-	_, err := c.Run(input)
-	if err != nil {
-		t.Fatalf("Run rejected canonical v1_3step calldata")
+	leavesA := makeChainedLeaves(crypto.Keccak256([]byte(wfA)), 1)
+	inputA := makeInputWithLeaves(wfA, leavesA)
+	if _, err := c.Run(inputA); err != nil {
+		t.Fatalf("block A run failed: %v", err)
+	}
+	rootA, _, errA := agnt2ParseLeaves(inputA)
+	if errA != 0 {
+		t.Fatalf("parse A unexpectedly failed: 0x%02x", errA)
 	}
 
-	root, set := GetInteractionRoot()
-	if !set {
-		t.Fatalf("GetInteractionRoot() returned set=false after successful Run")
+	leavesB := makeChainedLeaves(crypto.Keccak256([]byte(wfB)), 1)
+	inputB := makeInputWithLeaves(wfB, leavesB)
+	if _, err := c.Run(inputB); err != nil {
+		t.Fatalf("block B run failed: %v", err)
+	}
+	rootB, _, errB := agnt2ParseLeaves(inputB)
+	if errB != 0 {
+		t.Fatalf("parse B unexpectedly failed: 0x%02x", errB)
 	}
 
-	expectedBytes, _ := hex.DecodeString("d54c19717603e20fbf82ff44e90eafd7d1ad14ef4d7811f8802cc3c078cc86c3")
-	var expected [32]byte
-	copy(expected[:], expectedBytes)
-
-	if !bytes.Equal(root[:], expected[:]) {
-		t.Fatalf("Root hook MMR mismatch: want %x, got %x", expected, root)
-	}
-}
-
-func TestRootHook_v4_5step_PublishedAfterRun(t *testing.T) {
-	wfID := "test-wf-005"
-	steps := []struct {
-		stepID, agentRole string
-		payout            uint64
-	}{
-		{"step-1", "worker-a", 1000},
-		{"step-2", "worker-b", 2000},
-		{"step-3", "worker-c", 3000},
-		{"step-4", "worker-d", 4000},
-		{"step-5", "worker-e", 5000},
-	}
-	leavesBytes := makeCanonicalChain(wfID, steps)
-	var flat []byte
-	for _, l := range leavesBytes {
-		flat = append(flat, l...)
+	if bytes.Equal(rootA[:], rootB[:]) {
+		t.Fatalf("rootA and rootB unexpectedly equal — test fixtures broken")
 	}
 
-	input := makeInputWithLeaves(wfID, flat)
-	c := &agnt2Interaction{}
-
-	_, err := c.Run(input)
-	if err != nil {
-		t.Fatalf("Run rejected canonical v4_5step calldata")
-	}
-
-	root, set := GetInteractionRoot()
-	if !set {
-		t.Fatalf("GetInteractionRoot() returned set=false after successful Run")
-	}
-
-	expectedBytes, _ := hex.DecodeString("e34cda67eaf574138a02ab6ea87fd1ec55f8e3c09545f2c7c44edb8365316c91")
-	var expected [32]byte
-	copy(expected[:], expectedBytes)
-
-	if !bytes.Equal(root[:], expected[:]) {
-		t.Fatalf("Root hook MMR mismatch: want %x, got %x", expected, root)
+	// Re-parse A: must give the same rootA — proving Run() left no
+	// package-level state behind that would corrupt subsequent parses.
+	rootA2, _, _ := agnt2ParseLeaves(inputA)
+	if !bytes.Equal(rootA[:], rootA2[:]) {
+		t.Fatalf("re-parse of inputA produced a different root: first=%x second=%x", rootA, rootA2)
 	}
 }
 
-func TestRootHook_NotSetUntilFirstRun(t *testing.T) {
-	store := &agnt2RootStore{}
-	_, set := store.get()
-	if set {
-		t.Fatalf("fresh store should report set=false")
-	}
-}
-
-func TestRootHook_FailedRunDoesNotUpdate(t *testing.T) {
-	// Record current global state
-	beforeRoot, beforeSet := GetInteractionRoot()
-
-	// Make a failing run call
-	c := &agnt2Interaction{}
-	// Bad version byte
-	input := makeInput(0x01, 1000, 160000)
-	c.Run(input)
-
-	afterRoot, afterSet := GetInteractionRoot()
-	if beforeSet != afterSet || !bytes.Equal(beforeRoot[:], afterRoot[:]) {
-		t.Fatalf("Failed Run altered the global root store state. Before: %x (%v), After: %x (%v)", beforeRoot, beforeSet, afterRoot, afterSet)
-	}
-}
-
-func TestRootHook_Concurrency(t *testing.T) {
+// TestRun_ConcurrencySafe re-asserts the goroutine-safety property after
+// removing the singleton: the precompile is fully stateless across
+// concurrent invocations.
+func TestRun_ConcurrencySafe(t *testing.T) {
 	var wg sync.WaitGroup
 	wfID := "test-wf-001"
 	expectedHash := crypto.Keccak256([]byte(wfID))
@@ -994,49 +946,9 @@ func TestRootHook_Concurrency(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			c.Run(input)
-			GetInteractionRoot()
 		}()
 	}
 	wg.Wait()
-}
-
-// TestRootHook_ScaffoldOnly_NotBlockSafe documents the known scaffold
-// limitation: two sequential Run() calls overwrite the same root, with
-// no per-block isolation. This test LOCKS the limitation so anyone
-// removing the warning without doing the Week 11 architectural fix
-// will fail this test.
-func TestRootHook_ScaffoldOnly_NotBlockSafe(t *testing.T) {
-	c := &agnt2Interaction{}
-	wfA := "block-a-wf"
-	wfB := "block-b-wf"
-
-	// Submit block A's calldata
-	leavesA := makeChainedLeaves(crypto.Keccak256([]byte(wfA)), 1)
-	inputA := makeInputWithLeaves(wfA, leavesA)
-	if _, err := c.Run(inputA); err != nil {
-		t.Fatalf("block A run failed: %v", err)
-	}
-	rootA, _ := GetInteractionRoot()
-
-	// Submit block B's calldata — this OVERWRITES block A's root in the
-	// global store. Week 11 must replace this with per-block isolation.
-	leavesB := makeChainedLeaves(crypto.Keccak256([]byte(wfB)), 1)
-	inputB := makeInputWithLeaves(wfB, leavesB)
-	if _, err := c.Run(inputB); err != nil {
-		t.Fatalf("block B run failed: %v", err)
-	}
-	rootB, _ := GetInteractionRoot()
-
-	// The roots must differ (different workflow IDs produce different
-	// leaf hashes), and the global now holds B's root, not A's.
-	if rootA == rootB {
-		t.Fatalf("rootA and rootB unexpectedly equal — test fixtures broken")
-	}
-	// After block B's call, GetInteractionRoot returns B's root, NOT A's.
-	// This is the documented Week 10 scaffold behavior.
-	if currentRoot, _ := GetInteractionRoot(); currentRoot != rootB {
-		t.Fatalf("expected current root to equal rootB; scaffold semantic broken")
-	}
 }
 
 // --- Phase 6 Leaf-Event Parser Tests ---

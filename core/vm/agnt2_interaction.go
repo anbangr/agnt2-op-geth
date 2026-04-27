@@ -273,19 +273,14 @@ func validateAndBuildMMR(input []byte, stepCount uint64, abiHeaderSize uint64, w
 }
 
 func (c *agnt2Interaction) Run(input []byte) ([]byte, error) {
-	root, _, errCode := agnt2ParseLeaves(input)
+	_, _, errCode := agnt2ParseLeaves(input)
 	if errCode != 0 {
 		return []byte{errCode}, ErrExecutionReverted
 	}
-	// Phase 6 — publish root via native hook for op-node consumption. Note
-	// that this still publishes under STATICCALL because Run() runs before
-	// evmAGNT2PostHook detects the readOnly mode and converts the result to
-	// revertStaticCall. The root store is a pre-existing (Week 10) scaffold
-	// that's NOT block-safe; Phase 7 replaces it with header-field validation.
-	// In the meantime the STATICCALL path still mutates this singleton — the
-	// post-hook revert ensures the EVM-observable outcome is consistent (no
-	// logs, ErrExecutionReverted) even if the singleton briefly carries a
-	// stale root for a rejected call.
-	globalAgnt2RootStore.put(root)
+	// Phase 7 — Run() no longer publishes a root anywhere. The canonical
+	// MMR root is derived in core/types.FoldInteractionRoot from the per-leaf
+	// logs that evmAGNT2PostHook emits on the success path, and committed
+	// in the block header by the sequencer (consensus/beacon FinalizeAndAssemble).
+	// Block import re-folds the receipts and rejects mismatches.
 	return nil, nil
 }

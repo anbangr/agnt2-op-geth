@@ -309,6 +309,27 @@ func (beacon *Beacon) verifyHeader(chain consensus.ChainHeaderReader, header, pa
 	if !amsterdam && header.SlotNumber != nil {
 		return fmt.Errorf("invalid slotNumber: have %d, expected nil", *header.SlotNumber)
 	}
+	// AGNT2 Week 11 Phase 7: existence/non-existence of the interaction-MMR
+	// header fields. Both must be present together post-Isthmus (the AGNT2
+	// fork tag, matching the precompile registry init). Pre-Isthmus blocks
+	// MUST NOT carry these fields — older nodes that decode such headers
+	// via rlp:"optional" treat trailing data as absent and would diverge.
+	agnt2Active := chain.Config().IsOptimismIsthmus(header.Time)
+	if agnt2Active {
+		if header.InteractionRoot == nil {
+			return errors.New("header is missing interactionRoot")
+		}
+		if header.InteractionCount == nil {
+			return errors.New("header is missing interactionCount")
+		}
+	} else {
+		if header.InteractionRoot != nil {
+			return fmt.Errorf("invalid interactionRoot: have %x, expected nil", header.InteractionRoot)
+		}
+		if header.InteractionCount != nil {
+			return fmt.Errorf("invalid interactionCount: have %d, expected nil", *header.InteractionCount)
+		}
+	}
 	return nil
 }
 
@@ -434,6 +455,21 @@ func (beacon *Beacon) FinalizeAndAssemble(ctx context.Context, chain consensus.C
 			return nil, fmt.Errorf("error calculating DA footprint: %w", err)
 		}
 		header.BlobGasUsed = &daFootprint
+	}
+
+	// AGNT2 Week 11 Phase 7: populate the interaction MMR root + leaf count
+	// header fields from the canonical receipt-derived fold. Sequencer-side
+	// computation must match the verifier-side fold in block_validator.go;
+	// both routes call types.FoldInteractionRoot to keep the canonical
+	// (txIndex, logIndex) order consistent across sequencer and every
+	// validator. Fork-gated by Optimism Isthmus to align with the precompile
+	// activation tag in core/vm/agnt2_interaction.go init().
+	if chain.Config().IsOptimismIsthmus(header.Time) {
+		root, count := types.FoldInteractionRoot(receipts)
+		hashCopy := root
+		countCopy := count
+		header.InteractionRoot = &hashCopy
+		header.InteractionCount = &countCopy
 	}
 
 	// Assemble the final block.

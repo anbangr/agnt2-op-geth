@@ -38,6 +38,8 @@ func (h Header) MarshalJSON() ([]byte, error) {
 		ParentBeaconRoot *common.Hash    `json:"parentBeaconBlockRoot" rlp:"optional"`
 		RequestsHash     *common.Hash    `json:"requestsHash" rlp:"optional"`
 		SlotNumber       *hexutil.Uint64 `json:"slotNumber" rlp:"optional"`
+		InteractionRoot  *common.Hash    `json:"interactionRoot" rlp:"optional"`
+		InteractionCount *hexutil.Uint64 `json:"interactionCount" rlp:"optional"`
 		Hash             common.Hash     `json:"hash"`
 	}
 	var enc Header
@@ -63,6 +65,8 @@ func (h Header) MarshalJSON() ([]byte, error) {
 	enc.ParentBeaconRoot = h.ParentBeaconRoot
 	enc.RequestsHash = h.RequestsHash
 	enc.SlotNumber = (*hexutil.Uint64)(h.SlotNumber)
+	enc.InteractionRoot = h.InteractionRoot
+	enc.InteractionCount = (*hexutil.Uint64)(h.InteractionCount)
 	enc.Hash = h.Hash()
 	return json.Marshal(&enc)
 }
@@ -92,6 +96,8 @@ func (h *Header) UnmarshalJSON(input []byte) error {
 		ParentBeaconRoot *common.Hash    `json:"parentBeaconBlockRoot" rlp:"optional"`
 		RequestsHash     *common.Hash    `json:"requestsHash" rlp:"optional"`
 		SlotNumber       *hexutil.Uint64 `json:"slotNumber" rlp:"optional"`
+		InteractionRoot  *common.Hash    `json:"interactionRoot" rlp:"optional"`
+		InteractionCount *hexutil.Uint64 `json:"interactionCount" rlp:"optional"`
 	}
 	var dec Header
 	if err := json.Unmarshal(input, &dec); err != nil {
@@ -174,6 +180,12 @@ func (h *Header) UnmarshalJSON(input []byte) error {
 	}
 	if dec.SlotNumber != nil {
 		h.SlotNumber = (*uint64)(dec.SlotNumber)
+	}
+	if dec.InteractionRoot != nil {
+		h.InteractionRoot = dec.InteractionRoot
+	}
+	if dec.InteractionCount != nil {
+		h.InteractionCount = (*uint64)(dec.InteractionCount)
 	}
 	return nil
 }

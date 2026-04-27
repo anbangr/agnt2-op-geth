@@ -196,6 +196,37 @@ func (v *BlockValidator) ValidateState(block *types.Block, statedb *state.StateD
 			return fmt.Errorf("invalid withdrawals hash (remote: %s local: %s) dberr: %w", *header.WithdrawalsHash, root, statedb.Error())
 		}
 	}
+	// AGNT2 Week 11 Phase 7: validate the interaction MMR root + leaf count
+	// declared in the header against the receipt-derived fold. Logic lives
+	// in validateAGNT2InteractionFields so it can be unit-tested in
+	// isolation from the full ValidateState scaffolding (which needs a
+	// statedb + ProcessResult).
+	if err := validateAGNT2InteractionFields(header, res.Receipts); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateAGNT2InteractionFields enforces the Phase 7 contract: when a
+// header declares (InteractionRoot, InteractionCount), both must be
+// present and both must reproduce from the canonical receipt-derived fold.
+// Pre-fork blocks (absent fields) skip the branch — existence per fork
+// is enforced separately in consensus/beacon verifyHeader. Returning a
+// non-nil error means block import MUST reject this block.
+func validateAGNT2InteractionFields(header *types.Header, receipts []*types.Receipt) error {
+	if header.InteractionRoot == nil && header.InteractionCount == nil {
+		return nil
+	}
+	if header.InteractionRoot == nil || header.InteractionCount == nil {
+		return errors.New("AGNT2: interactionRoot and interactionCount must both be present or both absent")
+	}
+	gotRoot, gotCount := types.FoldInteractionRoot(receipts)
+	if gotRoot != *header.InteractionRoot {
+		return fmt.Errorf("AGNT2: invalid interaction root (remote: %x local: %x)", *header.InteractionRoot, gotRoot)
+	}
+	if gotCount != *header.InteractionCount {
+		return fmt.Errorf("AGNT2: invalid interaction count (remote: %d local: %d)", *header.InteractionCount, gotCount)
+	}
 	return nil
 }
 
