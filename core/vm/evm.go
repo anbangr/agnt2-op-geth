@@ -309,7 +309,7 @@ func (evm *EVM) Call(caller common.Address, addr common.Address, input []byte, g
 			stateDB = evm.StateDB
 		}
 		ret, gas, err = RunPrecompiledContract(stateDB, p, addr, input, gas, evm.Config.Tracer)
-		ret, gas, err = evmAGNT2PostHook(evm.StateDB, addr, input, ret, gas, err, false)
+		ret, gas, err = evmAGNT2PostHook(evm.StateDB, addr, input, ret, gas, err, evm.readOnly)
 	} else {
 		// Initialise a new contract and set the code that is to be used by the EVM.
 		code := evm.resolveCode(addr)
@@ -378,7 +378,7 @@ func (evm *EVM) CallCode(caller common.Address, addr common.Address, input []byt
 			stateDB = evm.StateDB
 		}
 		ret, gas, err = RunPrecompiledContract(stateDB, p, addr, input, gas, evm.Config.Tracer)
-		ret, gas, err = evmAGNT2PostHook(evm.StateDB, addr, input, ret, gas, err, false)
+		ret, gas, err = evmAGNT2PostHook(evm.StateDB, addr, input, ret, gas, err, evm.readOnly)
 	} else {
 		// Initialise a new contract and set the code that is to be used by the EVM.
 		// The contract is a scoped environment for this execution context only.
@@ -427,7 +427,7 @@ func (evm *EVM) DelegateCall(originCaller common.Address, caller common.Address,
 			stateDB = evm.StateDB
 		}
 		ret, gas, err = RunPrecompiledContract(stateDB, p, addr, input, gas, evm.Config.Tracer)
-		ret, gas, err = evmAGNT2PostHook(evm.StateDB, addr, input, ret, gas, err, false)
+		ret, gas, err = evmAGNT2PostHook(evm.StateDB, addr, input, ret, gas, err, evm.readOnly)
 	} else {
 		// Initialise a new contract and make initialise the delegate values
 		//
