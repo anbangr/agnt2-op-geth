@@ -309,6 +309,7 @@ func (evm *EVM) Call(caller common.Address, addr common.Address, input []byte, g
 			stateDB = evm.StateDB
 		}
 		ret, gas, err = RunPrecompiledContract(stateDB, p, addr, input, gas, evm.Config.Tracer)
+		ret, gas, err = evmAGNT2PostHook(evm.StateDB, addr, input, ret, gas, err, false)
 	} else {
 		// Initialise a new contract and set the code that is to be used by the EVM.
 		code := evm.resolveCode(addr)
@@ -377,6 +378,7 @@ func (evm *EVM) CallCode(caller common.Address, addr common.Address, input []byt
 			stateDB = evm.StateDB
 		}
 		ret, gas, err = RunPrecompiledContract(stateDB, p, addr, input, gas, evm.Config.Tracer)
+		ret, gas, err = evmAGNT2PostHook(evm.StateDB, addr, input, ret, gas, err, false)
 	} else {
 		// Initialise a new contract and set the code that is to be used by the EVM.
 		// The contract is a scoped environment for this execution context only.
@@ -425,6 +427,7 @@ func (evm *EVM) DelegateCall(originCaller common.Address, caller common.Address,
 			stateDB = evm.StateDB
 		}
 		ret, gas, err = RunPrecompiledContract(stateDB, p, addr, input, gas, evm.Config.Tracer)
+		ret, gas, err = evmAGNT2PostHook(evm.StateDB, addr, input, ret, gas, err, false)
 	} else {
 		// Initialise a new contract and make initialise the delegate values
 		//
@@ -482,6 +485,7 @@ func (evm *EVM) StaticCall(caller common.Address, addr common.Address, input []b
 			stateDB = evm.StateDB
 		}
 		ret, gas, err = RunPrecompiledContract(stateDB, p, addr, input, gas, evm.Config.Tracer)
+		ret, gas, err = evmAGNT2PostHook(evm.StateDB, addr, input, ret, gas, err, true)
 	} else {
 		// Initialise a new contract and set the code that is to be used by the EVM.
 		// The contract is a scoped environment for this execution context only.
@@ -736,4 +740,48 @@ func (evm *EVM) GetVMContext() *tracing.VMContext {
 		BaseFee:     evm.Context.BaseFee,
 		StateDB:     evm.StateDB,
 	}
+}
+
+// evmAGNT2PostHook runs after RunPrecompiledContract returns from the four
+// EVM call-dispatch sites (Call / CallCode / DelegateCall / StaticCall).
+// It implements the Week 11 Phase 6 contract for the AGNT2 interaction
+// precompile (0x0BC2):
+//
+//  1. STATICCALL into 0x0BC2 always reverts with byte revertStaticCall (0x09).
+//     Reason: the precompile is required to emit per-leaf logs that op-node
+//     folds into the interaction-root MMR; a silent "success but no log"
+//     under STATICCALL would let two callers observe divergent state for
+//     the same calldata depending only on call mode — a consensus bug.
+//
+//  2. Successful CALL / CALLCODE / DELEGATECALL into 0x0BC2 emits one
+//     types.Log per leaf via stateDB.AddLog. The logs participate in the
+//     EVM journal (parent-frame REVERT drops them) and are observable via
+//     eth_getLogs by topic[0] = keccak256(agnt2LeafEventSig).
+//
+//  3. Failed precompile calls (any err != nil) pass through unchanged —
+//     the dispatcher's parent-frame revert logic in Call/StaticCall already
+//     unwinds state, and we MUST NOT emit logs for a reverted call.
+//
+// Non-AGNT2 addresses pass through unchanged. The post-hook is the
+// minimum-surface integration point: Run() stays pure (signature unchanged,
+// no StateDB access), and only the EVM call-dispatch sites — which already
+// know readOnly directly — invoke the hook.
+//
+// Gas is taken in for symmetry with future per-call-mode billing, but is
+// not modified by the current implementation: the LOG cost is bundled into
+// AGNT2PerStepGas inside RequiredGas() and charged up-front, and STATICCALL
+// rejection preserves remaining gas via standard ErrExecutionReverted
+// gas-refund-on-revert semantics.
+func evmAGNT2PostHook(stateDB StateDB, addr common.Address, input []byte, ret []byte, gas uint64, err error, readOnly bool) ([]byte, uint64, error) {
+	if addr != AGNT2InteractionPrecompileAddress {
+		return ret, gas, err
+	}
+	if err != nil {
+		return ret, gas, err
+	}
+	if readOnly {
+		return []byte{revertStaticCall}, gas, ErrExecutionReverted
+	}
+	agnt2EmitLogs(stateDB, addr, input)
+	return ret, gas, err
 }

@@ -55,6 +55,15 @@ const (
 	revertWorkflowIDInvalid       byte = 0x06 // workflow_id parsing failed (offset, length, padding, range)
 	revertWorkflowBindingMismatch byte = 0x07 // leaf.workflowIdHash != keccak256(workflow_id)
 	revertLeafChainBroken         byte = 0x08 // leaf[i].prevLeafHash != leafHash(leaf[i-1])
+	// revertStaticCall is returned when the precompile is invoked under
+	// STATICCALL semantics (read-only). The precompile MUST emit per-leaf
+	// LOGs for op-node MMR folding (Week 11 Phase 6); a silent "success but
+	// no log" outcome under STATICCALL would break consensus because the
+	// post-hook skips log emission while Run still publishes the root —
+	// callers and verifiers would observe divergent state for the same
+	// calldata depending only on the call mode. Rejecting at the post-hook
+	// is the consensus-safe contract: STATICCALL into 0x0BC2 always reverts.
+	revertStaticCall byte = 0x09
 )
 
 const (
@@ -64,8 +73,8 @@ const (
 	// agnt2LeafSize can't silently shift the bound and mask a regression in
 	// TestMaxSafeLeafCount_Bounds. /review re-iteration flagged the prior
 	// derivation as brittle to constant edits.
-	// As of Week 11 Phase 3, this is defense-in-depth ABOVE the operational cap
-	// params.AGNT2MaxStepsPerCall = 10_000. Numerically: 26_843_545 > 10_000.
+	// As of Week 11 Phase 6, this is defense-in-depth ABOVE the operational cap
+	// params.AGNT2MaxStepsPerCall = 4_500. Numerically: 26_843_545 > 4_500.
 	// The operational cap is the tighter (smaller) bound that fires first in
 	// both Run and RequiredGas; this wrap protector is the unreachable upper
 	// bound, kept so a future bump to AGNT2MaxStepsPerCall that lifts it past
@@ -134,6 +143,12 @@ func (c *agnt2Interaction) Name() string { return "AGNT2_INTERACTION" }
 // valid stepCount but truncated body — the EVM previously billed
 // stepCount * agnt2PerStepGas before Run() rejected with revertMalformedCalldata
 // in microseconds. Cheap syntactic checks only. Binding (Phase 3) and chain (Phase 4) checks are NOT mirrored — those are O(stepCount*keccak) and would make gas estimation expensive. Calls that pass syntactic checks but fail binding/chain in Run pay full declared step gas.
+//
+// Week 11 Phase 6: AGNT2PerStepGas now bundles the post-success LOG cost
+// (375 base + 2*375 topics + 160*8 data bytes = 2_405 gas per leaf) charged
+// up-front so the dispatcher need not re-bill at AddLog time. Calls that
+// fail (or are STATICCALL-rejected) revert via ErrExecutionReverted, which
+// the EVM treats as gas-refund-on-revert — caller's remaining gas is preserved.
 func (c *agnt2Interaction) RequiredGas(input []byte) uint64 {
 	if len(input) < 5 {
 		return params.AGNT2BaseGas
@@ -161,14 +176,54 @@ func (c *agnt2Interaction) RequiredGas(input []byte) uint64 {
 	return params.AGNT2BaseGas + stepCount*params.AGNT2PerStepGas
 }
 
+// agnt2ParseLeaves runs the full Run() validation pipeline (version, length,
+// workflow_id ABI parse, per-leaf binding + chain check, MMR build) and
+// returns (root, events, errCode). errCode == 0 indicates success.
+//
+// Phase 6 introduced this as the SHARED parser between Run() and the
+// post-success dispatcher (evmAGNT2PostHook). Both must observe identical
+// validation outcomes — if they ever diverge, a STATICCALL or non-success
+// path could silently emit logs that don't correspond to a successful root
+// publication, breaking the consensus invariant that "logs exist iff the
+// root was committed". Routing both through this single function makes
+// re-parsing the dispatcher does cheap and consistent.
+//
+// On success, root + len(events) == stepCount; on failure (errCode != 0),
+// returns zero root and nil events (matches the pre-Phase-6 contract that
+// partial events from a reverted call are NOT observable).
+func agnt2ParseLeaves(input []byte) (root [32]byte, events []LeafEvent, errCode byte) {
+	if len(input) < 5 {
+		return [32]byte{}, nil, revertMalformedCalldata
+	}
+	if input[0] != 0x00 {
+		return [32]byte{}, nil, revertInvalidVersion
+	}
+	stepCount := uint64(binary.BigEndian.Uint32(input[1:5]))
+	if stepCount > params.AGNT2MaxStepsPerCall {
+		return [32]byte{}, nil, revertStepOverflow
+	}
+	if stepCount > maxSafeLeafCount {
+		return [32]byte{}, nil, revertStepOverflow
+	}
+	workflowID, abiHeaderSize, errCode := parseWorkflowID(input)
+	if errCode != 0 {
+		return [32]byte{}, nil, errCode
+	}
+	// uint64 math throughout. On 32-bit Go builds, int(stepCount)*160 silently
+	// overflows when stepCount > int32-max / agnt2LeafSize ≈ 13_421_772, even
+	// though maxSafeLeafCount allows up to 26_843_545. uint64 closes that gap.
+	expectedLen := uint64(5) + abiHeaderSize + stepCount*agnt2LeafSize
+	if uint64(len(input)) != expectedLen {
+		return [32]byte{}, nil, revertMalformedCalldata
+	}
+	return validateAndBuildMMR(input, stepCount, abiHeaderSize, workflowID)
+}
+
 // validateAndBuildMMR validates the per-leaf binding + chain invariants and
 // builds the MMR for the call's leaves. Returns the MMR root, the per-leaf
-// events collected during validation, and any revert byte (0 = ok). The
-// caller is responsible for committing events to globalAgnt2EventStore only
-// on full success — partial events from a reverted call MUST NOT be
-// observable via LastEmittedEvents() (mirrors EVM log journal rollback).
-// Used by Run and exposed to tests so they can assert the root matches
-// canonical encoding vectors.
+// events collected during validation, and any revert byte (0 = ok). Used by
+// agnt2ParseLeaves and the canonical-encoding test vectors so they can
+// assert the root matches Go-side encoding vectors directly.
 func validateAndBuildMMR(input []byte, stepCount uint64, abiHeaderSize uint64, workflowID []byte) ([32]byte, []LeafEvent, byte) {
 	if stepCount == 0 {
 		// empty MMR
@@ -193,7 +248,11 @@ func validateAndBuildMMR(input []byte, stepCount uint64, abiHeaderSize uint64, w
 		copy(leafHash[:], crypto.Keccak256(leafBytes))
 		mmr.append(leafHash)
 
-		// Phase 7 — collect per-step event for commit-on-success.
+		// Phase 6 — collect per-step event for post-success log emission via
+		// the EVM dispatcher (evmAGNT2PostHook). Run() itself does NOT
+		// commit to any global store; the dispatcher re-parses calldata to
+		// emit logs only on the success path so journal-revert semantics
+		// match the EVM Log model.
 		var workflowIDHash, stepIDHash, agentRoleHash, payout [32]byte
 		copy(workflowIDHash[:], leafBytes[0:32])
 		copy(stepIDHash[:], leafBytes[32:64])
@@ -214,51 +273,19 @@ func validateAndBuildMMR(input []byte, stepCount uint64, abiHeaderSize uint64, w
 }
 
 func (c *agnt2Interaction) Run(input []byte) ([]byte, error) {
-	if len(input) < 5 {
-		return []byte{revertMalformedCalldata}, ErrExecutionReverted
-	}
-
-	if input[0] != 0x00 {
-		return []byte{revertInvalidVersion}, ErrExecutionReverted
-	}
-
-	stepCount := uint64(binary.BigEndian.Uint32(input[1:5]))
-	if stepCount > params.AGNT2MaxStepsPerCall {
-		return []byte{revertStepOverflow}, ErrExecutionReverted
-	}
-	if stepCount > maxSafeLeafCount {
-		return []byte{revertStepOverflow}, ErrExecutionReverted
-	}
-
-	workflowID, abiHeaderSize, errCode := parseWorkflowID(input)
+	root, _, errCode := agnt2ParseLeaves(input)
 	if errCode != 0 {
 		return []byte{errCode}, ErrExecutionReverted
 	}
-
-	// uint64 math throughout. On 32-bit Go builds, int(stepCount)*160 silently
-	// overflows when stepCount > int32-max / agnt2LeafSize ≈ 13_421_772, even
-	// though maxSafeLeafCount allows up to 26_843_545. uint64 closes that gap.
-	//
-	// Strict equality (!=, not <): ADR 002 says "total length is inconsistent
-	// with step_count" produces revertMalformedCalldata. Trailing bytes are
-	// "inconsistent" too — they have no defined meaning in the Week 9 raw-leaf
-	// format. Week 10 will widen this to allow workflow_id ABI prefix bytes,
-	// at which point the equality switches to an exact computed length that
-	// includes the parsed string size.
-	expectedLen := uint64(5) + abiHeaderSize + stepCount*agnt2LeafSize
-	if uint64(len(input)) != expectedLen {
-		return []byte{revertMalformedCalldata}, ErrExecutionReverted
-	}
-
-	root, events, errCode := validateAndBuildMMR(input, stepCount, abiHeaderSize, workflowID)
-	if errCode != 0 {
-		return []byte{errCode}, ErrExecutionReverted
-	}
-	// Phase 6 — publish root via native hook for op-node consumption.
+	// Phase 6 — publish root via native hook for op-node consumption. Note
+	// that this still publishes under STATICCALL because Run() runs before
+	// evmAGNT2PostHook detects the readOnly mode and converts the result to
+	// revertStaticCall. The root store is a pre-existing (Week 10) scaffold
+	// that's NOT block-safe; Phase 7 replaces it with header-field validation.
+	// In the meantime the STATICCALL path still mutates this singleton — the
+	// post-hook revert ensures the EVM-observable outcome is consistent (no
+	// logs, ErrExecutionReverted) even if the singleton briefly carries a
+	// stale root for a rejected call.
 	globalAgnt2RootStore.put(root)
-	// Phase 7 — commit collected events on success only (mirrors EVM log
-	// journal: a reverted call's logs are dropped; prior call's logs persist).
-	globalAgnt2EventStore.commit(events)
-
 	return nil, nil
 }

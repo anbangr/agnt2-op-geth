@@ -663,7 +663,10 @@ func TestRevertCodeValues(t *testing.T) {
 
 // TestStepCountCaps_Bounds pins the literal values of both step-count caps:
 // (a) maxSafeLeafCount = 26_843_545 — uint32-overflow wrap protector
-// (b) params.AGNT2MaxStepsPerCall = 10_000 — operational cap (Week 11 Phase 3)
+// (b) params.AGNT2MaxStepsPerCall = 4_500 — operational cap (Week 11 Phase 6;
+//     tightened from 10_000 to absorb the per-leaf LOG cost added when log
+//     emission moved from a singleton to stateDB.AddLog via the dispatch
+//     post-hook).
 //
 // Invariants:
 //   - Wrap protector must continue to satisfy the uint32 fit (load-bearing
@@ -672,6 +675,8 @@ func TestRevertCodeValues(t *testing.T) {
 //     these are ever inverted, the wrap protector becomes reachable and the
 //     defense-in-depth ordering in Run/RequiredGas breaks. This is the
 //     guard the Phase 3 plan §"defense-in-depth" comment depends on.
+//   - Operational cap × per-step gas + base gas must leave ≥30% headroom under
+//     a 30M block gas limit (Phase 6 derivation).
 func TestStepCountCaps_Bounds(t *testing.T) {
 	if maxSafeLeafCount != 26_843_545 {
 		t.Fatalf("maxSafeLeafCount changed: want 26_843_545, got %d", maxSafeLeafCount)
@@ -682,12 +687,38 @@ func TestStepCountCaps_Bounds(t *testing.T) {
 	if (maxSafeLeafCount+1)*agnt2LeafSize <= uint64(^uint32(0)) {
 		t.Fatalf("(maxSafeLeafCount+1)*leafSize must exceed uint32; got %d", (maxSafeLeafCount+1)*agnt2LeafSize)
 	}
-	if params.AGNT2MaxStepsPerCall != 10_000 {
-		t.Fatalf("AGNT2MaxStepsPerCall changed: want 10_000, got %d", params.AGNT2MaxStepsPerCall)
+	if params.AGNT2MaxStepsPerCall != 4_500 {
+		t.Fatalf("AGNT2MaxStepsPerCall changed: want 4_500, got %d", params.AGNT2MaxStepsPerCall)
 	}
 	if params.AGNT2MaxStepsPerCall >= maxSafeLeafCount {
 		t.Fatalf("ordering invariant broken: operational cap (%d) must be < wrap protector (%d)",
 			params.AGNT2MaxStepsPerCall, maxSafeLeafCount)
+	}
+	// 30M block gas budget × 70% = 21M usable per call.
+	const blockGasBudget = uint64(30_000_000)
+	const headroomFraction = uint64(70) // permille / 100; using integer math
+	maxAllowedCallGas := blockGasBudget * headroomFraction / 100
+	worstCaseCallGas := params.AGNT2BaseGas + params.AGNT2MaxStepsPerCall*params.AGNT2PerStepGas
+	if worstCaseCallGas > maxAllowedCallGas {
+		t.Fatalf("AGNT2 worst-case call gas %d exceeds 70%% of 30M block (%d) — re-derive cap",
+			worstCaseCallGas, maxAllowedCallGas)
+	}
+}
+
+// TestPerStepGas_LogCostAccounted pins the Phase 6 per-step gas derivation:
+// AGNT2PerStepGas must include the LOG cost (375 base + 2 topics × 375 +
+// 160 data bytes × 8 = 2_405) on top of the Run() validation cost (2_000).
+// If the LOG cost is ever stripped without re-deriving the cap, this test
+// fires before the silent under-billing of an emitted log.
+func TestPerStepGas_LogCostAccounted(t *testing.T) {
+	const runValidationCost = uint64(2_000)
+	const logBaseCost = params.LogGas
+	const logTopicCost = uint64(2) * params.LogTopicGas
+	const logDataCost = uint64(160) * params.LogDataGas
+	expected := runValidationCost + logBaseCost + logTopicCost + logDataCost
+	if params.AGNT2PerStepGas != expected {
+		t.Fatalf("AGNT2PerStepGas %d != expected %d (run %d + LogGas %d + 2×LogTopicGas %d + 160×LogDataGas %d)",
+			params.AGNT2PerStepGas, expected, runValidationCost, logBaseCost, logTopicCost, logDataCost)
 	}
 }
 
@@ -1008,23 +1039,25 @@ func TestRootHook_ScaffoldOnly_NotBlockSafe(t *testing.T) {
 	}
 }
 
-// --- Phase 7 Leaf Events Tests ---
+// --- Phase 6 Leaf-Event Parser Tests ---
+//
+// Phase 6 replaced the singleton globalAgnt2EventStore with stateDB.AddLog
+// emission via the EVM dispatch post-hook (evmAGNT2PostHook). The shared
+// parser helper agnt2ParseLeaves remains the single source of truth for
+// "what events would be emitted given this calldata"; these tests pin the
+// parser's event-shape contract directly. The full dispatch-path tests
+// that observe real receipt logs live in agnt2_dispatch_logs_test.go.
 
-func TestLeafEvents_OneStepEmission(t *testing.T) {
-	t.Cleanup(globalAgnt2EventStore.reset)
-	globalAgnt2EventStore.reset()
-
-	c := &agnt2Interaction{}
+func TestLeafEventParser_OneStep(t *testing.T) {
 	wfID := "test-event-1"
 	expectedHash := crypto.Keccak256([]byte(wfID))
 	leaves := makeChainedLeaves(expectedHash, 1)
 
 	input := makeInputWithLeaves(wfID, leaves)
-	if _, err := c.Run(input); err != nil {
-		t.Fatalf("Run failed: %v", err)
+	_, events, errCode := agnt2ParseLeaves(input)
+	if errCode != 0 {
+		t.Fatalf("parse failed with errCode 0x%02x", errCode)
 	}
-
-	events := LastEmittedEvents()
 	if len(events) != 1 {
 		t.Fatalf("expected 1 event, got %d", len(events))
 	}
@@ -1055,21 +1088,16 @@ func TestLeafEvents_OneStepEmission(t *testing.T) {
 	}
 }
 
-func TestLeafEvents_ThreeStepOrder(t *testing.T) {
-	t.Cleanup(globalAgnt2EventStore.reset)
-	globalAgnt2EventStore.reset()
-
-	c := &agnt2Interaction{}
+func TestLeafEventParser_ThreeStepOrder(t *testing.T) {
 	wfID := "test-event-3"
 	expectedHash := crypto.Keccak256([]byte(wfID))
 	leaves := makeChainedLeaves(expectedHash, 3)
 
 	input := makeInputWithLeaves(wfID, leaves)
-	if _, err := c.Run(input); err != nil {
-		t.Fatalf("Run failed: %v", err)
+	_, events, errCode := agnt2ParseLeaves(input)
+	if errCode != 0 {
+		t.Fatalf("parse failed with errCode 0x%02x", errCode)
 	}
-
-	events := LastEmittedEvents()
 	if len(events) != 3 {
 		t.Fatalf("expected 3 events, got %d", len(events))
 	}
@@ -1090,92 +1118,72 @@ func TestLeafEvents_ThreeStepOrder(t *testing.T) {
 	}
 }
 
-// TestLeafEvents_FailedCallPreservesPriorEvents documents the commit-on-success
-// semantic: a successful call commits its events to the singleton; a subsequent
-// failing call MUST leave those events untouched. This mirrors the EVM log
-// journal — a reverted call's logs are dropped, and prior calls' logs remain
-// visible to consumers calling LastEmittedEvents().
-func TestLeafEvents_FailedCallPreservesPriorEvents(t *testing.T) {
-	t.Cleanup(globalAgnt2EventStore.reset)
-	globalAgnt2EventStore.reset()
-
-	c := &agnt2Interaction{}
-	wfID := "test-event-preserve"
-	expectedHash := crypto.Keccak256([]byte(wfID))
-	leaves := makeChainedLeaves(expectedHash, 3)
-
-	if _, err := c.Run(makeInputWithLeaves(wfID, leaves)); err != nil {
-		t.Fatalf("first Run failed: %v", err)
+// TestLeafEventParser_FailedCallEmitsNoEvents covers the parser's
+// commit-on-success contract: a parse that fails (any errCode != 0)
+// MUST return events == nil so the dispatcher's emit loop has nothing to
+// fold into stateDB.AddLog. The pre-Phase-6 commit-on-success singleton
+// behavior is now provided by the dispatcher itself: the post-hook only
+// invokes agnt2EmitLogs when err == nil from RunPrecompiledContract.
+func TestLeafEventParser_FailedParseEmitsNoEvents(t *testing.T) {
+	cases := []struct {
+		name     string
+		input    []byte
+		wantCode byte
+	}{
+		{"bad version", makeInput(0x01, 1000, 160000), revertInvalidVersion},
+		{"step overflow", makeInput(0x00, uint32(params.AGNT2MaxStepsPerCall+1), 0), revertStepOverflow},
+		{"malformed length", makeInput(0x00, 1, 159), revertMalformedCalldata},
 	}
-	if got := len(LastEmittedEvents()); got != 3 {
-		t.Fatalf("expected 3 events after success, got %d", got)
-	}
-
-	// Submit malformed call (bad version) — must NOT clobber prior events.
-	badInput := makeInput(0x01, 1000, 160000)
-	if _, err := c.Run(badInput); err == nil {
-		t.Fatalf("expected malformed call to revert")
-	}
-
-	eventsAfter := LastEmittedEvents()
-	if len(eventsAfter) != 3 {
-		t.Fatalf("commit-on-success violated: expected prior 3 events to persist after failed run, got %d", len(eventsAfter))
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, events, errCode := agnt2ParseLeaves(tc.input)
+			if errCode != tc.wantCode {
+				t.Fatalf("expected errCode 0x%02x, got 0x%02x", tc.wantCode, errCode)
+			}
+			if len(events) != 0 {
+				t.Fatalf("expected 0 events on failed parse, got %d", len(events))
+			}
+		})
 	}
 }
 
-// TestLeafEvents_FailedRunHasNoEvents covers the inverse: a chain-break
-// mid-loop must NOT leak partial events. validateAndBuildMMR returns nil
-// events on revert and Run() never calls commit, so the singleton's prior
-// state (here: empty) is preserved.
-func TestLeafEvents_FailedRunHasNoEvents(t *testing.T) {
-	t.Cleanup(globalAgnt2EventStore.reset)
-	globalAgnt2EventStore.reset()
-
-	c := &agnt2Interaction{}
+// TestLeafEventParser_ChainBrokenEmitsNoPartialEvents covers the inverse:
+// a chain-break mid-loop must NOT leak partial events. validateAndBuildMMR
+// returns nil events on the first invalid leaf — the dispatcher's emit
+// loop sees zero events and emits nothing.
+func TestLeafEventParser_ChainBrokenEmitsNoPartialEvents(t *testing.T) {
 	wfID := "test-event-chainbreak"
 	expectedHash := crypto.Keccak256([]byte(wfID))
 	leaves := makeChainedLeaves(expectedHash, 3)
-
-	// Corrupt leaf 1's prevLeafHash to break chain at step 1
+	// Corrupt leaf 1's prevLeafHash to break chain at step 1.
 	leaves[160+160-1] = 0xFF
 
 	input := makeInputWithLeaves(wfID, leaves)
-	_, err := c.Run(input)
-	if !errors.Is(err, ErrExecutionReverted) {
-		t.Fatalf("expected ErrExecutionReverted, got %v", err)
+	_, events, errCode := agnt2ParseLeaves(input)
+	if errCode != revertLeafChainBroken {
+		t.Fatalf("expected revertLeafChainBroken (0x08), got 0x%02x", errCode)
 	}
-
-	events := LastEmittedEvents()
 	if len(events) != 0 {
-		t.Fatalf("expected 0 events after chain-break revert (commit-on-success), got %d", len(events))
+		t.Fatalf("expected 0 events on chain-break, got %d (would leak partial state)", len(events))
 	}
 }
 
-func TestLeafEvents_StepCountZero_NoEvents(t *testing.T) {
-	t.Cleanup(globalAgnt2EventStore.reset)
-	globalAgnt2EventStore.reset()
-
-	c := &agnt2Interaction{}
+func TestLeafEventParser_StepCountZero_NoEvents(t *testing.T) {
 	input := makeInput(0x00, 0, 0)
-	if _, err := c.Run(input); err != nil {
-		t.Fatalf("Run failed: %v", err)
+	_, events, errCode := agnt2ParseLeaves(input)
+	if errCode != 0 {
+		t.Fatalf("zero-step parse failed: 0x%02x", errCode)
 	}
-
-	events := LastEmittedEvents()
 	if len(events) != 0 {
 		t.Fatalf("expected 0 events for zero steps, got %d", len(events))
 	}
 }
 
-// TestLeafEvents_Concurrency runs N successful Run() calls in parallel
-// where each goroutine uses a distinct wfID. The final snapshot must
-// contain stepCount events all bound to a single wfID — proving the
-// commit() replace-in-place is atomic and the snapshot is not a torn
-// mix from multiple commits. Race detector also checks read/write races.
-func TestLeafEvents_Concurrency(t *testing.T) {
-	t.Cleanup(globalAgnt2EventStore.reset)
-	globalAgnt2EventStore.reset()
-
+// TestLeafEventParser_DeterministicConcurrent runs the parser in parallel
+// across distinct workflow IDs and asserts each goroutine sees a result
+// bound to its own input — the parser is pure, so the race detector is
+// the load-bearing assertion here.
+func TestLeafEventParser_DeterministicConcurrent(t *testing.T) {
 	const goroutines = 16
 	const stepCount = 4
 
@@ -1185,30 +1193,31 @@ func TestLeafEvents_Concurrency(t *testing.T) {
 		g := g
 		go func() {
 			defer wg.Done()
-			c := &agnt2Interaction{}
 			wfID := fmt.Sprintf("test-event-conc-%d", g)
 			expectedHash := crypto.Keccak256([]byte(wfID))
 			leaves := makeChainedLeaves(expectedHash, stepCount)
-			if _, err := c.Run(makeInputWithLeaves(wfID, leaves)); err != nil {
-				t.Errorf("Run failed: %v", err)
+			_, events, errCode := agnt2ParseLeaves(makeInputWithLeaves(wfID, leaves))
+			if errCode != 0 {
+				t.Errorf("g=%d parse errCode 0x%02x", g, errCode)
+				return
+			}
+			if len(events) != stepCount {
+				t.Errorf("g=%d expected %d events, got %d", g, stepCount, len(events))
+				return
+			}
+			var wantWf [32]byte
+			copy(wantWf[:], expectedHash)
+			for i, e := range events {
+				if e.WorkflowIDHash != wantWf {
+					t.Errorf("g=%d event[%d] wfHash mismatch (parser leaked across goroutines)", g, i)
+					return
+				}
+				if e.StepIndex != uint32(i) {
+					t.Errorf("g=%d event[%d] StepIndex %d", g, i, e.StepIndex)
+					return
+				}
 			}
 		}()
 	}
 	wg.Wait()
-
-	events := LastEmittedEvents()
-	if len(events) != stepCount {
-		t.Fatalf("expected store length %d after concurrent commits, got %d", stepCount, len(events))
-	}
-	// All events in the final snapshot must share the same WorkflowIDHash
-	// (the winning writer) — a torn commit would mix two writers' events.
-	winnerHash := events[0].WorkflowIDHash
-	for i, e := range events {
-		if e.StepIndex != uint32(i) {
-			t.Fatalf("event[%d] StepIndex %d (likely torn snapshot)", i, e.StepIndex)
-		}
-		if e.WorkflowIDHash != winnerHash {
-			t.Fatalf("event[%d] WorkflowIDHash differs from event[0] — torn commit detected", i)
-		}
-	}
 }

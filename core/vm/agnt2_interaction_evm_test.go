@@ -9,11 +9,11 @@ import (
 	"github.com/ethereum/go-ethereum/params"
 )
 
-// Phase 1 — these tests prove the AGNT2 precompile is reachable via the
-// op-geth precompile dispatch path (RunPrecompiledContract). They do NOT
-// stand up a full EVM with state — that's reserved for Phase 6 (persistent
-// MMR state) and Phase 7 (block-header interaction-root). The dispatch
-// surface is what Phase 1 wires up; the state is what Phase 6+ wires up.
+// Phase 1 tests prove the AGNT2 precompile is reachable via op-geth's
+// PrecompiledContract dispatch path (RunPrecompiledContract). They do NOT
+// stand up a full EVM with state — that's covered by the dispatch tests in
+// agnt2_dispatch_logs_test.go (Phase 6) which exercise the post-success
+// log-emission path through evm.Call/StaticCall.
 
 func TestAgnt2Registry_AddressLockedAt0x0BC2(t *testing.T) {
 	expected := common.BytesToAddress([]byte{0x0B, 0xC2})
@@ -106,14 +106,18 @@ func TestAgnt2Registry_AddressSliceIncludes0x0BC2(t *testing.T) {
 	}
 }
 
-// TestAgnt2Dispatch_HappyPath_1Step exercises the full RunPrecompiledContract
-// path that op-geth uses when an EVM CALL targets a precompile address.
+// TestAgnt2Dispatch_HappyPath_1Step exercises the precompile dispatch path
+// that op-geth uses when an EVM CALL targets a precompile address.
 // Parameterized over both Isthmus and Jovian precompile sets to confirm
 // dispatch works on both Optimism fork-tags AGNT2 supports.
 //
 // Asserts: (a) the precompile resolves via the registry, (b) gas is charged
 // at AGNT2BaseGas + N*AGNT2PerStepGas exactly, (c) returnData is empty on
 // success, (d) no err.
+//
+// Phase 6: log emission no longer happens at this layer (RunPrecompiledContract
+// does not call evmAGNT2PostHook). The full dispatch test that asserts log
+// emission lives in agnt2_dispatch_logs_test.go.
 func TestAgnt2Dispatch_HappyPath_1Step(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -124,8 +128,6 @@ func TestAgnt2Dispatch_HappyPath_1Step(t *testing.T) {
 	} {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			t.Cleanup(globalAgnt2EventStore.reset)
-			globalAgnt2EventStore.reset()
 			t.Cleanup(globalAgnt2RootStore.reset)
 
 			p, ok := tc.set[AGNT2InteractionPrecompileAddress]
@@ -152,9 +154,6 @@ func TestAgnt2Dispatch_HappyPath_1Step(t *testing.T) {
 				t.Fatalf("gas charged %d, want %d (= AGNT2BaseGas %d + 1*AGNT2PerStepGas %d)",
 					got, expectedGas, params.AGNT2BaseGas, params.AGNT2PerStepGas)
 			}
-			if got := len(LastEmittedEvents()); got != 1 {
-				t.Fatalf("expected 1 leaf event committed via dispatch, got %d", got)
-			}
 		})
 	}
 }
@@ -169,8 +168,6 @@ func TestAgnt2Dispatch_HappyPath_1Step(t *testing.T) {
 // not errors.Is — that's what the EVM uses), (b) the revert byte is the
 // first byte of returnData (ADR 002 §Revert Error Codes contract).
 func TestAgnt2Dispatch_RevertOnBadVersion(t *testing.T) {
-	t.Cleanup(globalAgnt2EventStore.reset)
-	globalAgnt2EventStore.reset()
 	t.Cleanup(globalAgnt2RootStore.reset)
 
 	p := PrecompiledContractsJovian[AGNT2InteractionPrecompileAddress]
@@ -200,8 +197,6 @@ func TestAgnt2Dispatch_RevertOnBadVersion(t *testing.T) {
 // pays nothing at the precompile body and sees the standard EVM out-of-gas
 // signal.
 func TestAgnt2Dispatch_OutOfGas(t *testing.T) {
-	t.Cleanup(globalAgnt2EventStore.reset)
-	globalAgnt2EventStore.reset()
 	t.Cleanup(globalAgnt2RootStore.reset)
 
 	p := PrecompiledContractsJovian[AGNT2InteractionPrecompileAddress]
@@ -213,12 +208,15 @@ func TestAgnt2Dispatch_OutOfGas(t *testing.T) {
 	required := params.AGNT2BaseGas + 3*params.AGNT2PerStepGas
 	starved := required - 1
 
+	beforeRoot, beforeSet := GetInteractionRoot()
 	_, _, err := RunPrecompiledContract(nil, p, AGNT2InteractionPrecompileAddress, input, starved, nil)
 	if !errors.Is(err, ErrOutOfGas) {
 		t.Fatalf("expected ErrOutOfGas, got %v", err)
 	}
-	// Run() must NOT have executed — store stays empty.
-	if got := len(LastEmittedEvents()); got != 0 {
-		t.Fatalf("dispatch ran Run() despite OOG (store has %d events)", got)
+	// Run() must NOT have executed — root store remains unchanged from before
+	// the gas-starved attempt.
+	afterRoot, afterSet := GetInteractionRoot()
+	if beforeSet != afterSet || beforeRoot != afterRoot {
+		t.Fatalf("dispatch ran Run() despite OOG (root store mutated)")
 	}
 }
