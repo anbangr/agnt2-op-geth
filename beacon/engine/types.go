@@ -123,21 +123,29 @@ type ExecutableData struct {
 	// instead of computing the root from a withdrawals list, set it directly.
 	// The "withdrawals" list attribute must be non-nil but empty.
 	WithdrawalsRoot *common.Hash `json:"withdrawalsRoot,omitempty"`
+
+	// AGNT2 Week 11 Phase 7: MMR root + leaf count computed by FinalizeAndAssemble.
+	// Always non-nil for Isthmus blocks (zero-value root + count=0 for empty blocks).
+	// Required in the payload so that ExecutableDataToBlock can reconstruct the exact
+	// block header and compute the correct block hash.
+	InteractionRoot  *common.Hash `json:"interactionRoot,omitempty"`
+	InteractionCount *uint64      `json:"interactionCount,omitempty"`
 }
 
 // JSON type overrides for executableData.
 type executableDataMarshaling struct {
-	Number        hexutil.Uint64
-	GasLimit      hexutil.Uint64
-	GasUsed       hexutil.Uint64
-	Timestamp     hexutil.Uint64
-	BaseFeePerGas *hexutil.Big
-	ExtraData     hexutil.Bytes
-	LogsBloom     hexutil.Bytes
-	Transactions  []hexutil.Bytes
-	BlobGasUsed   *hexutil.Uint64
-	ExcessBlobGas *hexutil.Uint64
-	SlotNumber    *hexutil.Uint64
+	Number           hexutil.Uint64
+	GasLimit         hexutil.Uint64
+	GasUsed          hexutil.Uint64
+	Timestamp        hexutil.Uint64
+	BaseFeePerGas    *hexutil.Big
+	ExtraData        hexutil.Bytes
+	LogsBloom        hexutil.Bytes
+	Transactions     []hexutil.Bytes
+	BlobGasUsed      *hexutil.Uint64
+	ExcessBlobGas    *hexutil.Uint64
+	SlotNumber       *hexutil.Uint64
+	InteractionCount *hexutil.Uint64
 }
 
 // StatelessPayloadStatusV1 is the result of a stateless payload execution.
@@ -367,6 +375,8 @@ func ExecutableDataToBlockNoHash(data ExecutableData, versionedHashes []common.H
 		ParentBeaconRoot: beaconRoot,
 		RequestsHash:     requestsHash,
 		SlotNumber:       data.SlotNumber,
+		InteractionRoot:  data.InteractionRoot,
+		InteractionCount: data.InteractionCount,
 	}
 	return types.NewBlockWithHeader(header).
 			WithBody(types.Body{Transactions: txs, Uncles: nil, Withdrawals: data.Withdrawals}),
@@ -377,24 +387,26 @@ func ExecutableDataToBlockNoHash(data ExecutableData, versionedHashes []common.H
 // fields from the given block. It assumes the given block is post-merge block.
 func BlockToExecutableData(block *types.Block, fees *big.Int, sidecars []*types.BlobTxSidecar, requests [][]byte) *ExecutionPayloadEnvelope {
 	data := &ExecutableData{
-		BlockHash:     block.Hash(),
-		ParentHash:    block.ParentHash(),
-		FeeRecipient:  block.Coinbase(),
-		StateRoot:     block.Root(),
-		Number:        block.NumberU64(),
-		GasLimit:      block.GasLimit(),
-		GasUsed:       block.GasUsed(),
-		BaseFeePerGas: block.BaseFee(),
-		Timestamp:     block.Time(),
-		ReceiptsRoot:  block.ReceiptHash(),
-		LogsBloom:     block.Bloom().Bytes(),
-		Transactions:  encodeTransactions(block.Transactions()),
-		Random:        block.MixDigest(),
-		ExtraData:     block.Extra(),
-		Withdrawals:   block.Withdrawals(),
-		BlobGasUsed:   block.BlobGasUsed(),
-		ExcessBlobGas: block.ExcessBlobGas(),
-		SlotNumber:    block.SlotNumber(),
+		BlockHash:        block.Hash(),
+		ParentHash:       block.ParentHash(),
+		FeeRecipient:     block.Coinbase(),
+		StateRoot:        block.Root(),
+		Number:           block.NumberU64(),
+		GasLimit:         block.GasLimit(),
+		GasUsed:          block.GasUsed(),
+		BaseFeePerGas:    block.BaseFee(),
+		Timestamp:        block.Time(),
+		ReceiptsRoot:     block.ReceiptHash(),
+		LogsBloom:        block.Bloom().Bytes(),
+		Transactions:     encodeTransactions(block.Transactions()),
+		Random:           block.MixDigest(),
+		ExtraData:        block.Extra(),
+		Withdrawals:      block.Withdrawals(),
+		BlobGasUsed:      block.BlobGasUsed(),
+		ExcessBlobGas:    block.ExcessBlobGas(),
+		SlotNumber:       block.SlotNumber(),
+		InteractionRoot:  block.Header().InteractionRoot,
+		InteractionCount: block.Header().InteractionCount,
 	}
 
 	// OP-Stack: only Isthmus execution payloads must set the withdrawals root.

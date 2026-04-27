@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"math"
@@ -211,6 +212,18 @@ func (c *SimulatedBeacon) sealBlock(withdrawals []*types.Withdrawal, timestamp u
 	if c.eth.BlockChain().Config().LatestFork(timestamp) == forks.Amsterdam {
 		slotNumber := uint64(0)
 		attribute.SlotNumber = &slotNumber
+	}
+	// OP-Stack: GasLimit is required in payload attributes for Optimism chains.
+	// For Holocene+, EIP1559Params (8-byte BE: denom uint32 + elasticity uint32) is also required.
+	if c.eth.BlockChain().Config().IsOptimism() {
+		opcfg := c.eth.BlockChain().Config()
+		gasLimit := c.eth.BlockChain().CurrentBlock().GasLimit
+		attribute.GasLimit = &gasLimit
+		if opcfg.IsHolocene(timestamp) {
+			attribute.EIP1559Params = make([]byte, 8)
+			binary.BigEndian.PutUint32(attribute.EIP1559Params[:4], uint32(opcfg.BaseFeeChangeDenominator(timestamp)))
+			binary.BigEndian.PutUint32(attribute.EIP1559Params[4:], uint32(opcfg.ElasticityMultiplier()))
+		}
 	}
 
 	// Create a server span for forkchoiceUpdated with payload attributes,

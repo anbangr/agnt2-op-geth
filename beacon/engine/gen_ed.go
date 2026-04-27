@@ -32,10 +32,12 @@ func (e ExecutableData) MarshalJSON() ([]byte, error) {
 		BlockHash       common.Hash         `json:"blockHash"     gencodec:"required"`
 		Transactions    []hexutil.Bytes     `json:"transactions"  gencodec:"required"`
 		Withdrawals     []*types.Withdrawal `json:"withdrawals"`
-		BlobGasUsed     *hexutil.Uint64     `json:"blobGasUsed"`
-		ExcessBlobGas   *hexutil.Uint64     `json:"excessBlobGas"`
-		SlotNumber      *hexutil.Uint64     `json:"slotNumber"`
-		WithdrawalsRoot *common.Hash        `json:"withdrawalsRoot,omitempty"`
+		BlobGasUsed      *hexutil.Uint64     `json:"blobGasUsed"`
+		ExcessBlobGas    *hexutil.Uint64     `json:"excessBlobGas"`
+		SlotNumber       *hexutil.Uint64     `json:"slotNumber"`
+		WithdrawalsRoot  *common.Hash        `json:"withdrawalsRoot,omitempty"`
+		InteractionRoot  *common.Hash        `json:"interactionRoot,omitempty"`
+		InteractionCount *hexutil.Uint64     `json:"interactionCount,omitempty"`
 	}
 	var enc ExecutableData
 	enc.ParentHash = e.ParentHash
@@ -62,6 +64,8 @@ func (e ExecutableData) MarshalJSON() ([]byte, error) {
 	enc.ExcessBlobGas = (*hexutil.Uint64)(e.ExcessBlobGas)
 	enc.SlotNumber = (*hexutil.Uint64)(e.SlotNumber)
 	enc.WithdrawalsRoot = e.WithdrawalsRoot
+	enc.InteractionRoot = e.InteractionRoot
+	enc.InteractionCount = (*hexutil.Uint64)(e.InteractionCount)
 	return json.Marshal(&enc)
 }
 
@@ -83,10 +87,12 @@ func (e *ExecutableData) UnmarshalJSON(input []byte) error {
 		BlockHash       *common.Hash        `json:"blockHash"     gencodec:"required"`
 		Transactions    []hexutil.Bytes     `json:"transactions"  gencodec:"required"`
 		Withdrawals     []*types.Withdrawal `json:"withdrawals"`
-		BlobGasUsed     *hexutil.Uint64     `json:"blobGasUsed"`
-		ExcessBlobGas   *hexutil.Uint64     `json:"excessBlobGas"`
-		SlotNumber      *hexutil.Uint64     `json:"slotNumber"`
-		WithdrawalsRoot *common.Hash        `json:"withdrawalsRoot,omitempty"`
+		BlobGasUsed      *hexutil.Uint64     `json:"blobGasUsed"`
+		ExcessBlobGas    *hexutil.Uint64     `json:"excessBlobGas"`
+		SlotNumber       *hexutil.Uint64     `json:"slotNumber"`
+		WithdrawalsRoot  *common.Hash        `json:"withdrawalsRoot,omitempty"`
+		InteractionRoot  *common.Hash        `json:"interactionRoot,omitempty"`
+		InteractionCount *hexutil.Uint64     `json:"interactionCount,omitempty"`
 	}
 	var dec ExecutableData
 	if err := json.Unmarshal(input, &dec); err != nil {
@@ -165,6 +171,12 @@ func (e *ExecutableData) UnmarshalJSON(input []byte) error {
 	}
 	if dec.WithdrawalsRoot != nil {
 		e.WithdrawalsRoot = dec.WithdrawalsRoot
+	}
+	if dec.InteractionRoot != nil {
+		e.InteractionRoot = dec.InteractionRoot
+	}
+	if dec.InteractionCount != nil {
+		e.InteractionCount = (*uint64)(dec.InteractionCount)
 	}
 	return nil
 }
