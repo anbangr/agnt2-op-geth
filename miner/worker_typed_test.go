@@ -9,6 +9,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/internal/agnt2debug"
 	"github.com/ethereum/go-ethereum/metrics"
 	"github.com/stretchr/testify/require"
 )
@@ -173,4 +174,46 @@ func TestCommitTypedTransactions_StaleNonce(t *testing.T) {
 	// In E4.3 prototype, commitTransaction is not called so staleNonce is never triggered.
 	// Verify the tx is admitted to env.txs.
 	require.Len(t, env.txs, 1, "tx must be admitted (staleNonce not checked in E4.3 prototype)")
+}
+
+// TestCommitTypedTransactions_BadOrderSwap verifies the E4.6 bad-order injection path:
+// when agnt2debug.SetBadOrder is called for a block, commitTypedTransactions swaps
+// the two entries at the given indices in the topologically-sorted output.
+func TestCommitTypedTransactions_BadOrderSwap(t *testing.T) {
+	miner, env := setupTypedEnv(t)
+	ctx := context.Background()
+
+	// Use block 9999 so this test cannot interfere with other tests.
+	blockNum := uint64(9999)
+	env.header.Number = big.NewInt(int64(blockNum))
+
+	wfId := common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000007")
+	tx1 := newTestInvokeTx(wfId, 1, []common.Hash{})
+	tx2 := newTestInvokeTx(wfId, 2, []common.Hash{tx1.Hash()})
+
+	// Without injection, topological order places tx1 before tx2.
+	err := miner.commitTypedTransactions(ctx, env, []*types.Transaction{tx2, tx1})
+	require.NoError(t, err)
+	require.Len(t, env.txs, 2)
+	naturalFirst := env.txs[0].Hash()
+	naturalSecond := env.txs[1].Hash()
+	require.Equal(t, tx1.Hash(), naturalFirst, "tx1 (no deps) must be first in natural order")
+
+	// Reset env and inject bad order for the same block — indices [0,1] swap positions 0 and 1.
+	env.txs = env.txs[:0]
+	agnt2debug.SetBadOrder(blockNum, []int{0, 1})
+
+	err = miner.commitTypedTransactions(ctx, env, []*types.Transaction{tx2, tx1})
+	require.NoError(t, err)
+	require.Len(t, env.txs, 2)
+
+	// After swap, the order must be inverted relative to natural topological order.
+	require.Equal(t, naturalSecond, env.txs[0].Hash(), "swap must move position-1 to position-0")
+	require.Equal(t, naturalFirst, env.txs[1].Hash(), "swap must move position-0 to position-1")
+
+	// Consume-once: a second run without re-injection must restore natural order.
+	env.txs = env.txs[:0]
+	err = miner.commitTypedTransactions(ctx, env, []*types.Transaction{tx2, tx1})
+	require.NoError(t, err)
+	require.Equal(t, naturalFirst, env.txs[0].Hash(), "no injection on second run — natural order restored")
 }
