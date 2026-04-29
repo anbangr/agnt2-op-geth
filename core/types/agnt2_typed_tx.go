@@ -32,6 +32,7 @@ const (
 )
 
 var (
+	ErrAgnt2AgentRoleEmpty   = errors.New("agnt2 agent role must not be empty")
 	ErrAgnt2AgentRoleTooLong = errors.New("agnt2 agent role exceeds 64 bytes")
 	ErrAgnt2AgentRoleUTF8    = errors.New("agnt2 agent role must be valid UTF-8")
 	ErrAgnt2AgentRoleNFC     = errors.New("agnt2 agent role must be NFC-normalized")
@@ -41,6 +42,9 @@ var (
 )
 
 func validateAgnt2AgentRole(role string) error {
+	if len(role) == 0 {
+		return ErrAgnt2AgentRoleEmpty
+	}
 	if len(role) > Agnt2MaxAgentRoleBytes {
 		return ErrAgnt2AgentRoleTooLong
 	}

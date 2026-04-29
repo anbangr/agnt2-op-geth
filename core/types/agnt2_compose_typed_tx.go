@@ -18,6 +18,7 @@ package types
 
 import (
 	"bytes"
+	"errors"
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -86,12 +87,28 @@ func (tx *ComposeTypedTx) setSignatureValues(chainID, v, r, s *big.Int) {
 	tx.ChainID, tx.V, tx.R, tx.S = chainID, v, r, s
 }
 
+func (tx *ComposeTypedTx) validate() error {
+	if int(tx.StepCount) != len(tx.StepWorkflowRoots) {
+		return errors.New("AGNT2: ComposeTypedTx StepWorkflowRoots length must equal StepCount")
+	}
+	if int(tx.StepCount) != len(tx.Payouts) {
+		return errors.New("AGNT2: ComposeTypedTx Payouts length must equal StepCount")
+	}
+	return nil
+}
+
 func (tx *ComposeTypedTx) encode(b *bytes.Buffer) error {
+	if err := tx.validate(); err != nil {
+		return err
+	}
 	return rlp.Encode(b, tx)
 }
 
 func (tx *ComposeTypedTx) decode(input []byte) error {
-	return rlp.DecodeBytes(input, tx)
+	if err := rlp.DecodeBytes(input, tx); err != nil {
+		return err
+	}
+	return tx.validate()
 }
 
 func (tx *ComposeTypedTx) sigHash(chainID *big.Int) common.Hash {

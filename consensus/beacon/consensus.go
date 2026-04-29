@@ -31,6 +31,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
+	"github.com/ethereum/go-ethereum/internal/agnt2debug"
 	"github.com/ethereum/go-ethereum/internal/telemetry"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/trie"
@@ -329,6 +330,13 @@ func (beacon *Beacon) verifyHeader(chain consensus.ChainHeaderReader, header, pa
 		if header.InteractionCount != nil {
 			return fmt.Errorf("invalid interactionCount: have %d, expected nil", *header.InteractionCount)
 		}
+		// TypedOpRoot/TypedOpCount are also AGNT2 extension fields — reject pre-fork.
+		if header.TypedOpRoot != nil {
+			return fmt.Errorf("invalid typedOpRoot: have %x, expected nil pre-fork", header.TypedOpRoot)
+		}
+		if header.TypedOpCount != nil {
+			return fmt.Errorf("invalid typedOpCount: have %d, expected nil pre-fork", *header.TypedOpCount)
+		}
 	}
 	return nil
 }
@@ -476,6 +484,10 @@ func (beacon *Beacon) FinalizeAndAssemble(ctx context.Context, chain consensus.C
 		// so the optional RLP fields remain nil for compatibility blocks.
 		typedRoot, typedCount := types.FoldTypedOpRoot(body.Transactions)
 		if typedCount > 0 {
+			// E4.6: allow test harness to inject a bad root for correctness testing.
+			if badRoot, ok := agnt2debug.GetBadRoot(header.Number.Uint64()); ok {
+				typedRoot = badRoot
+			}
 			rootCopy := typedRoot
 			countCopy2 := typedCount
 			header.TypedOpRoot = &rootCopy

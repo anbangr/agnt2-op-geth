@@ -1,25 +1,28 @@
+// Copyright 2026 The go-ethereum Authors
+// This file is part of the go-ethereum library.
+//
+// The go-ethereum library is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Lesser General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// The go-ethereum library is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Lesser General Public License for more details.
+//
+// You should have received a copy of the GNU Lesser General Public License
+// along with the go-ethereum library. If not, see <http://www.gnu.org/licenses/>.
+
 package ethapi
 
 import (
 	"context"
 	"errors"
-	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/internal/agnt2debug"
 )
-
-// agnt2DebugState holds injected bad-root / bad-order overrides for testing.
-// Only active when chain_id == 9001 (E4.6 local follower harness).
-var agnt2DebugState struct {
-	mu         sync.Mutex
-	badRoots   map[uint64]common.Hash // blockNumber → injected bad typedOpRoot
-	badOrders  map[uint64][]int       // blockNumber → swap indices for dep reorder
-}
-
-func init() {
-	agnt2DebugState.badRoots = make(map[uint64]common.Hash)
-	agnt2DebugState.badOrders = make(map[uint64][]int)
-}
 
 // Agnt2DebugAPI exposes debug methods for the E4.6 local follower harness.
 // All methods are guarded by chain_id == 9001 to prevent accidental use on mainnet.
@@ -52,9 +55,7 @@ func (api *Agnt2DebugAPI) SetBadRoot(ctx context.Context, blockNumber uint64, ba
 	if chainID != 9001 {
 		return errors.New("debug_setBadRoot is only available on chain_id 9001")
 	}
-	agnt2DebugState.mu.Lock()
-	defer agnt2DebugState.mu.Unlock()
-	agnt2DebugState.badRoots[blockNumber] = badRoot
+	agnt2debug.SetBadRoot(blockNumber, badRoot)
 	return nil
 }
 
@@ -74,31 +75,6 @@ func (api *Agnt2DebugAPI) SetBadOrder(ctx context.Context, blockNumber uint64, s
 	if len(swapIndices) != 2 {
 		return errors.New("swapIndices must have exactly 2 elements")
 	}
-	agnt2DebugState.mu.Lock()
-	defer agnt2DebugState.mu.Unlock()
-	agnt2DebugState.badOrders[blockNumber] = swapIndices
+	agnt2debug.SetBadOrder(blockNumber, swapIndices)
 	return nil
-}
-
-// GetBadRoot returns the injected bad root for blockNumber (zero hash = none).
-// Used internally by the block-building pipeline.
-func GetAgnt2BadRoot(blockNumber uint64) (common.Hash, bool) {
-	agnt2DebugState.mu.Lock()
-	defer agnt2DebugState.mu.Unlock()
-	h, ok := agnt2DebugState.badRoots[blockNumber]
-	if ok {
-		delete(agnt2DebugState.badRoots, blockNumber)
-	}
-	return h, ok
-}
-
-// GetBadOrder returns the injected swap indices for blockNumber (nil = none).
-func GetAgnt2BadOrder(blockNumber uint64) ([]int, bool) {
-	agnt2DebugState.mu.Lock()
-	defer agnt2DebugState.mu.Unlock()
-	s, ok := agnt2DebugState.badOrders[blockNumber]
-	if ok {
-		delete(agnt2DebugState.badOrders, blockNumber)
-	}
-	return s, ok
 }

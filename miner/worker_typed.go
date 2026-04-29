@@ -5,6 +5,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/internal/agnt2debug"
 	"github.com/ethereum/go-ethereum/metrics"
 )
 
@@ -101,8 +102,14 @@ func (miner *Miner) commitTypedTransactions(ctx context.Context, env *environmen
 		}
 	}
 
-	// Phase 5: append topologically sorted txs to env.
+	// Phase 5: apply E4.6 bad-order injection if set for this block, then append.
 	// Actual execution is handled by the precompile in a later phase.
+	if swapIdx, ok := agnt2debug.GetBadOrder(env.header.Number.Uint64()); ok && len(swapIdx) == 2 {
+		i, j := swapIdx[0], swapIdx[1]
+		if i >= 0 && j >= 0 && i < len(sorted) && j < len(sorted) {
+			sorted[i], sorted[j] = sorted[j], sorted[i]
+		}
+	}
 	env.txs = append(env.txs, sorted...)
 
 	return nil

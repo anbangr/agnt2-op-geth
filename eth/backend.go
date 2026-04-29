@@ -521,6 +521,9 @@ func (s *Ethereum) APIs() []rpc.API {
 			Namespace: "debug",
 			Service:   NewDebugAPI(s),
 		}, {
+			Namespace: "debug",
+			Service:   ethapi.NewAgnt2DebugAPI(s.APIBackend),
+		}, {
 			Namespace: "net",
 			Service:   s.netRPCService,
 		},

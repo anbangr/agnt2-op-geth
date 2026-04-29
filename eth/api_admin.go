@@ -40,6 +40,15 @@ func NewAdminAPI(eth *Ethereum) *AdminAPI {
 	return &AdminAPI{eth: eth}
 }
 
+// Metrics returns AGNT2 instrumentation counters for the E4 correctness harness.
+// The map key "engine_invalid_block_count" holds the number of blocks rejected
+// because the declared TypedOpRoot did not match the locally recomputed root.
+func (api *AdminAPI) Metrics() map[string]interface{} {
+	return map[string]interface{}{
+		"engine_invalid_block_count": core.Agnt2InvalidSignatureCount.Load(),
+	}
+}
+
 // ExportChain exports the current blockchain into a local file,
 // or a range of blocks if first and last are non-nil.
 func (api *AdminAPI) ExportChain(file string, first *uint64, last *uint64) (bool, error) {
