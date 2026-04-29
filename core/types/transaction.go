@@ -46,11 +46,14 @@ var (
 
 // Transaction types.
 const (
-	LegacyTxType     = 0x00
-	AccessListTxType = 0x01
-	DynamicFeeTxType = 0x02
-	BlobTxType       = 0x03
-	SetCodeTxType    = 0x04
+	LegacyTxType       = 0x00
+	AccessListTxType   = 0x01
+	DynamicFeeTxType   = 0x02
+	BlobTxType         = 0x03
+	SetCodeTxType      = 0x04
+	InvokeTxType       = 0x7A
+	RespondTxType      = 0x7B
+	ComposeTypedTxType = 0x7C
 )
 
 // Transaction is an Ethereum transaction.
@@ -82,7 +85,7 @@ func NewTx(inner TxData) *Transaction {
 
 // TxData is the underlying data of a transaction.
 //
-// This is implemented by DynamicFeeTx, LegacyTx and AccessListTx.
+// This is implemented by DynamicFeeTx, LegacyTx, AccessListTx, and AGNT2 typed txs.
 type TxData interface {
 	txType() byte // returns the type ID
 	copy() TxData // creates a deep copy and initializes all fields
@@ -225,6 +228,12 @@ func (tx *Transaction) decodeTyped(b []byte) (TxData, error) {
 		inner = new(SetCodeTx)
 	case DepositTxType:
 		inner = new(DepositTx)
+	case InvokeTxType:
+		inner = new(InvokeTx)
+	case RespondTxType:
+		inner = new(RespondTx)
+	case ComposeTypedTxType:
+		inner = new(ComposeTypedTx)
 	default:
 		return nil, ErrTxTypeNotSupported
 	}

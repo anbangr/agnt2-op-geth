@@ -172,10 +172,11 @@ type Message struct {
 	// - GasLimit is not checked against the protocol defined tx gaslimit
 	SkipTransactionChecks bool
 
-	IsSystemTx     bool                 // IsSystemTx indicates the message, if also a deposit, does not emit gas usage.
-	IsDepositTx    bool                 // IsDepositTx indicates the message is force-included and can persist a mint.
-	Mint           *big.Int             // Mint is the amount to mint before EVM processing, or nil if there is no minting.
-	RollupCostData types.RollupCostData // RollupCostData caches data to compute the fee we charge for data availability
+	IsSystemTx        bool                 // IsSystemTx indicates the message, if also a deposit, does not emit gas usage.
+	IsDepositTx       bool                 // IsDepositTx indicates the message is force-included and can persist a mint.
+	Mint              *big.Int             // Mint is the amount to mint before EVM processing, or nil if there is no minting.
+	RollupCostData    types.RollupCostData // RollupCostData caches data to compute the fee we charge for data availability
+	Agnt2IntrinsicGas uint64               // Agnt2IntrinsicGas reserves typed-op state-write gas.
 }
 
 // TransactionToMessage converts a transaction into a Message.
@@ -196,10 +197,11 @@ func TransactionToMessage(tx *types.Transaction, s types.Signer, baseFee *big.In
 		BlobHashes:            tx.BlobHashes(),
 		BlobGasFeeCap:         tx.BlobGasFeeCap(),
 
-		IsSystemTx:     tx.IsSystemTx(),
-		IsDepositTx:    tx.IsDepositTx(),
-		Mint:           tx.Mint(),
-		RollupCostData: tx.RollupCostData(),
+		IsSystemTx:        tx.IsSystemTx(),
+		IsDepositTx:       tx.IsDepositTx(),
+		Mint:              tx.Mint(),
+		RollupCostData:    tx.RollupCostData(),
+		Agnt2IntrinsicGas: tx.Agnt2IntrinsicGasSurcharge(),
 	}
 	// If baseFee provided, set gasPrice to effectiveGasPrice.
 	if baseFee != nil {
@@ -539,6 +541,12 @@ func (st *stateTransition) innerExecute() (*ExecutionResult, error) {
 	gas, err := IntrinsicGas(msg.Data, msg.AccessList, msg.SetCodeAuthorizations, contractCreation, rules.IsHomestead, rules.IsIstanbul, rules.IsShanghai)
 	if err != nil {
 		return nil, err
+	}
+	if msg.Agnt2IntrinsicGas != 0 {
+		if math.MaxUint64-gas < msg.Agnt2IntrinsicGas {
+			return nil, ErrGasUintOverflow
+		}
+		gas += msg.Agnt2IntrinsicGas
 	}
 	if st.gasRemaining < gas {
 		return nil, fmt.Errorf("%w: have %d, want %d", ErrIntrinsicGas, st.gasRemaining, gas)

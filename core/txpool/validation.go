@@ -164,6 +164,12 @@ func ValidateTransaction(tx *types.Transaction, head *types.Header, signer types
 	if err != nil {
 		return err
 	}
+	if agnt2Gas := tx.Agnt2IntrinsicGasSurcharge(); agnt2Gas != 0 {
+		if ^uint64(0)-intrGas < agnt2Gas {
+			return core.ErrGasUintOverflow
+		}
+		intrGas += agnt2Gas
+	}
 	if tx.Gas() < intrGas {
 		return fmt.Errorf("%w: gas %v, minimum needed %v", core.ErrIntrinsicGas, tx.Gas(), intrGas)
 	}
