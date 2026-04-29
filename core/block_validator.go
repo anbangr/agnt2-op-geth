@@ -174,6 +174,9 @@ func (v *BlockValidator) ValidateState(block *types.Block, statedb *state.StateD
 	if err := validateAGNT2InteractionFields(header, res.Receipts); err != nil {
 		return err
 	}
+	if err := validateAGNT2TypedOpFields(header, block.Transactions()); err != nil {
+		return err
+	}
 	// In stateless mode, return early because the receipt and state root are not
 	// provided through the witness, rather the cross validator needs to return it.
 	if stateless {
@@ -229,6 +232,27 @@ func validateAGNT2InteractionFields(header *types.Header, receipts []*types.Rece
 	}
 	if gotCount != *header.InteractionCount {
 		return fmt.Errorf("AGNT2: invalid interaction count (remote: %d local: %d)", *header.InteractionCount, gotCount)
+	}
+	return nil
+}
+
+// validateAGNT2TypedOpFields enforces the E4.4 contract: when a header
+// declares (TypedOpRoot, TypedOpCount), both must be present and both must
+// reproduce from the canonical typed-transaction fold. Half-pair (one nil,
+// one non-nil) is always rejected.
+func validateAGNT2TypedOpFields(header *types.Header, txs []*types.Transaction) error {
+	if header.TypedOpRoot == nil && header.TypedOpCount == nil {
+		return nil
+	}
+	if header.TypedOpRoot == nil || header.TypedOpCount == nil {
+		return errors.New("AGNT2: typedOpRoot and typedOpCount must both be present or both absent")
+	}
+	gotRoot, gotCount := types.FoldTypedOpRoot(txs)
+	if gotRoot != *header.TypedOpRoot {
+		return fmt.Errorf("AGNT2: invalid typed-op root (remote: %x local: %x)", *header.TypedOpRoot, gotRoot)
+	}
+	if gotCount != *header.TypedOpCount {
+		return fmt.Errorf("AGNT2: invalid typed-op count (remote: %d local: %d)", *header.TypedOpCount, gotCount)
 	}
 	return nil
 }

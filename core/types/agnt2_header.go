@@ -131,6 +131,27 @@ func buildPerfectTree(nodes [][32]byte) [32]byte {
 	return buildPerfectTree(next)
 }
 
+// FoldTypedOpRoot computes the AGNT2 typed-op MMR root and leaf count from
+// the typed transactions (InvokeTx/RespondTx/ComposeTypedTx) in a block. The
+// MMR leaves are the canonical tx hashes in block order. Blocks with no typed
+// transactions return (emptyMMRRoot, 0).
+func FoldTypedOpRoot(txs []*Transaction) (common.Hash, uint64) {
+	var leaves [][32]byte
+	for _, tx := range txs {
+		if tx == nil {
+			continue
+		}
+		switch tx.Type() {
+		case InvokeTxType, RespondTxType, ComposeTypedTxType:
+			h := tx.Hash()
+			var leaf [32]byte
+			copy(leaf[:], h[:])
+			leaves = append(leaves, leaf)
+		}
+	}
+	return foldMMR(leaves), uint64(len(leaves))
+}
+
 // AGNT2InteractionPrecompileAddressForTest exposes the package-private
 // address constant for tests in other packages that need to construct
 // synthetic AGNT2 logs (e.g., block-import validation tests). Production

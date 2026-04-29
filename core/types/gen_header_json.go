@@ -40,6 +40,8 @@ func (h Header) MarshalJSON() ([]byte, error) {
 		SlotNumber       *hexutil.Uint64 `json:"slotNumber" rlp:"optional"`
 		InteractionRoot  *common.Hash    `json:"interactionRoot" rlp:"optional"`
 		InteractionCount *hexutil.Uint64 `json:"interactionCount" rlp:"optional"`
+		TypedOpRoot      *common.Hash    `json:"typedOpRoot" rlp:"optional"`
+		TypedOpCount     *hexutil.Uint64 `json:"typedOpCount" rlp:"optional"`
 		Hash             common.Hash     `json:"hash"`
 	}
 	var enc Header
@@ -67,6 +69,8 @@ func (h Header) MarshalJSON() ([]byte, error) {
 	enc.SlotNumber = (*hexutil.Uint64)(h.SlotNumber)
 	enc.InteractionRoot = h.InteractionRoot
 	enc.InteractionCount = (*hexutil.Uint64)(h.InteractionCount)
+	enc.TypedOpRoot = h.TypedOpRoot
+	enc.TypedOpCount = (*hexutil.Uint64)(h.TypedOpCount)
 	enc.Hash = h.Hash()
 	return json.Marshal(&enc)
 }
@@ -98,6 +102,8 @@ func (h *Header) UnmarshalJSON(input []byte) error {
 		SlotNumber       *hexutil.Uint64 `json:"slotNumber" rlp:"optional"`
 		InteractionRoot  *common.Hash    `json:"interactionRoot" rlp:"optional"`
 		InteractionCount *hexutil.Uint64 `json:"interactionCount" rlp:"optional"`
+		TypedOpRoot      *common.Hash    `json:"typedOpRoot" rlp:"optional"`
+		TypedOpCount     *hexutil.Uint64 `json:"typedOpCount" rlp:"optional"`
 	}
 	var dec Header
 	if err := json.Unmarshal(input, &dec); err != nil {
@@ -186,6 +192,12 @@ func (h *Header) UnmarshalJSON(input []byte) error {
 	}
 	if dec.InteractionCount != nil {
 		h.InteractionCount = (*uint64)(dec.InteractionCount)
+	}
+	if dec.TypedOpRoot != nil {
+		h.TypedOpRoot = dec.TypedOpRoot
+	}
+	if dec.TypedOpCount != nil {
+		h.TypedOpCount = (*uint64)(dec.TypedOpCount)
 	}
 	return nil
 }

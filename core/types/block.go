@@ -117,6 +117,12 @@ type Header struct {
 	// validation across reorgs — verifiers need leaf count to bind peaks
 	// to a specific MMR shape.
 	InteractionCount *uint64 `json:"interactionCount" rlp:"optional"`
+
+	// TypedOpRoot is the root of the typed operations tree.
+	TypedOpRoot *common.Hash `json:"typedOpRoot" rlp:"optional"`
+
+	// TypedOpCount is the number of typed operations in the block.
+	TypedOpCount *uint64 `json:"typedOpCount" rlp:"optional"`
 }
 
 // field type overrides for gencodec
@@ -133,6 +139,7 @@ type headerMarshaling struct {
 	ExcessBlobGas    *hexutil.Uint64
 	SlotNumber       *hexutil.Uint64
 	InteractionCount *hexutil.Uint64
+	TypedOpCount     *hexutil.Uint64
 }
 
 // Hash returns the block hash of the header, which is simply the keccak256 hash of its
@@ -377,6 +384,14 @@ func CopyHeader(h *Header) *Header {
 	if h.InteractionCount != nil {
 		cpy.InteractionCount = new(uint64)
 		*cpy.InteractionCount = *h.InteractionCount
+	}
+	if h.TypedOpRoot != nil {
+		cpy.TypedOpRoot = new(common.Hash)
+		*cpy.TypedOpRoot = *h.TypedOpRoot
+	}
+	if h.TypedOpCount != nil {
+		cpy.TypedOpCount = new(uint64)
+		*cpy.TypedOpCount = *h.TypedOpCount
 	}
 	return &cpy
 }

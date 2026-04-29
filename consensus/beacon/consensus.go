@@ -470,6 +470,17 @@ func (beacon *Beacon) FinalizeAndAssemble(ctx context.Context, chain consensus.C
 		countCopy := count
 		header.InteractionRoot = &hashCopy
 		header.InteractionCount = &countCopy
+
+		// E4.4: populate typed-op MMR root + count from the block's typed
+		// transactions. Only set when typed txs are present; absent otherwise
+		// so the optional RLP fields remain nil for compatibility blocks.
+		typedRoot, typedCount := types.FoldTypedOpRoot(body.Transactions)
+		if typedCount > 0 {
+			rootCopy := typedRoot
+			countCopy2 := typedCount
+			header.TypedOpRoot = &rootCopy
+			header.TypedOpCount = &countCopy2
+		}
 	}
 
 	// Assemble the final block.
