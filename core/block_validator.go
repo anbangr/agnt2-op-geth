@@ -19,6 +19,7 @@ package core
 import (
 	"errors"
 	"fmt"
+	"sync/atomic"
 
 	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/core/state"
@@ -26,6 +27,12 @@ import (
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/trie"
 )
+
+// Agnt2InvalidSignatureCount counts blocks rejected because the declared
+// TypedOpRoot did not match the locally recomputed root. A mismatch indicates
+// either a forged/corrupted typed-tx signature or a sequencer bug. Exported
+// for metrics and test assertions; safe for concurrent access.
+var Agnt2InvalidSignatureCount atomic.Uint64
 
 // BlockValidator is responsible for validating block headers, uncles and
 // processed state.
@@ -249,6 +256,7 @@ func validateAGNT2TypedOpFields(header *types.Header, txs []*types.Transaction) 
 	}
 	gotRoot, gotCount := types.FoldTypedOpRoot(txs)
 	if gotRoot != *header.TypedOpRoot {
+		Agnt2InvalidSignatureCount.Add(1)
 		return fmt.Errorf("AGNT2: invalid typed-op root (remote: %x local: %x)", *header.TypedOpRoot, gotRoot)
 	}
 	if gotCount != *header.TypedOpCount {

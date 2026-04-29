@@ -141,6 +141,69 @@ func TestValidateAGNT2InteractionFields_EmptyBlock(t *testing.T) {
 	}
 }
 
+// TestAgnt2InvalidSignatureCount verifies that Agnt2InvalidSignatureCount
+// increments exactly once when validateAGNT2TypedOpFields rejects a block
+// whose TypedOpRoot doesn't match the actual typed transactions.
+// Plan §8.7 requirement (a) — invalid_signature_count counter.
+func TestAgnt2InvalidSignatureCount(t *testing.T) {
+	before := Agnt2InvalidSignatureCount.Load()
+
+	// Build an InvokeTx and compute the correct root.
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer := types.NewLondonSigner(big.NewInt(9001))
+	tx, err := types.SignTx(types.NewTx(&types.InvokeTx{
+		ChainID:      big.NewInt(9001),
+		Nonce:        1,
+		GasTipCap:    big.NewInt(1e9),
+		GasFeeCap:    big.NewInt(2e10),
+		Gas:          100000,
+		WorkflowId:   common.HexToHash("0x" + strings.Repeat("11", 32)),
+		StepId:       1,
+		AgentRole:    "worker",
+		DepInvokeIds: []common.Hash{},
+		Payload:      []byte("test"),
+		V:            new(big.Int),
+		R:            new(big.Int),
+		S:            new(big.Int),
+	}), signer, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	txs := []*types.Transaction{tx}
+	correctRoot, correctCount := types.FoldTypedOpRoot(txs)
+
+	// Tamper: flip one byte of the declared root.
+	tamperedRoot := correctRoot
+	tamperedRoot[0] ^= 0xFF
+	header := &types.Header{TypedOpRoot: &tamperedRoot, TypedOpCount: &correctCount}
+
+	if err := validateAGNT2TypedOpFields(header, txs); err == nil {
+		t.Fatal("expected root-mismatch rejection, got nil")
+	}
+
+	after := Agnt2InvalidSignatureCount.Load()
+	if after != before+1 {
+		t.Fatalf("Agnt2InvalidSignatureCount: expected %d, got %d", before+1, after)
+	}
+}
+
+// TestValidateAGNT2TypedOpFields_BackwardsCompat_EIP1559Only verifies that
+// a block containing only EIP-1559 transactions (no TypedOpRoot/TypedOpCount
+// header fields) passes validateAGNT2TypedOpFields cleanly. This is the
+// backwards-compat path: pre-fork blocks must still import without error.
+func TestValidateAGNT2TypedOpFields_BackwardsCompat_EIP1559Only(t *testing.T) {
+	header := &types.Header{} // both TypedOpRoot and TypedOpCount are nil
+	txs := []*types.Transaction{}
+
+	if err := validateAGNT2TypedOpFields(header, txs); err != nil {
+		t.Fatalf("EIP-1559-only block (no typed fields) should pass, got: %v", err)
+	}
+}
+
 // --- helpers ---
 
 func makeAgnt2LeafLog(stepIndex uint32, leafHash [32]byte) *types.Log {
