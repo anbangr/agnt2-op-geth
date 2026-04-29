@@ -56,3 +56,8 @@ func (c *Counter) Inc(i int64) {
 func (c *Counter) Snapshot() CounterSnapshot {
 	return CounterSnapshot((*atomic.Int64)(c).Load())
 }
+
+// Load returns the current value of the counter.
+func (c *Counter) Load() int64 {
+	return (*atomic.Int64)(c).Load()
+}

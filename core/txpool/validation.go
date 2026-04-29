@@ -61,13 +61,26 @@ func EffectiveGasLimit(chainConfig *params.ChainConfig, gasLimit uint64, effecti
 type ValidationOptions struct {
 	Config *params.ChainConfig // Chain configuration to selectively validate based on current fork rules
 
-	Accept       uint8    // Bitmap of transaction types that should be accepted for the calling pool
+	Accept       uint8    // Bitmap of low transaction types that should be accepted for the calling pool
+	AcceptTypes  []byte   // Additional high transaction type bytes accepted by the calling pool
 	MaxSize      uint64   // Maximum size of a transaction that the caller can meaningfully handle
 	MaxBlobCount int      // Maximum number of blobs allowed per transaction
 	MinTip       *big.Int // Minimum gas tip needed to allow a transaction into the caller pool
 
 	EffectiveGasCeil uint64 // if non-zero, a gas ceiling to enforce independent of the header's gaslimit value
 	MaxTxGasLimit    uint64 // Maximum gas limit allowed per individual transaction
+}
+
+func (opts *ValidationOptions) acceptsTxType(kind byte) bool {
+	if kind < 8 && opts.Accept&(1<<kind) != 0 {
+		return true
+	}
+	for _, accepted := range opts.AcceptTypes {
+		if accepted == kind {
+			return true
+		}
+	}
+	return false
 }
 
 // ValidationFunction is an method type which the pools use to perform the tx-validations which do not
@@ -92,8 +105,11 @@ func ValidateTransaction(tx *types.Transaction, head *types.Header, signer types
 		return core.ErrTxTypeNotSupported
 	}
 	// Ensure transactions not implemented by the calling pool are rejected
-	if opts.Accept&(1<<tx.Type()) == 0 {
+	if !opts.acceptsTxType(tx.Type()) {
 		return fmt.Errorf("%w: tx type %v not supported by this pool", core.ErrTxTypeNotSupported, tx.Type())
+	}
+	if err := tx.ValidateAgnt2Envelope(); err != nil {
+		return err
 	}
 	if blobCount := len(tx.BlobHashes()); blobCount > opts.MaxBlobCount {
 		return fmt.Errorf("%w: blob count %v, limit %v", ErrTxBlobLimitExceeded, blobCount, opts.MaxBlobCount)

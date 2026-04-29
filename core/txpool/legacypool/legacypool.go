@@ -317,8 +317,7 @@ func New(config Config, chain BlockChain) *LegacyPool {
 	return pool
 }
 
-// Filter returns whether the given transaction can be consumed by the legacy
-// pool, specifically, whether it is a Legacy, AccessList or Dynamic transaction.
+// Filter returns whether the given transaction can be consumed by the legacy pool.
 func (pool *LegacyPool) Filter(tx *types.Transaction) bool {
 	return pool.FilterType(tx.Type())
 }
@@ -326,7 +325,8 @@ func (pool *LegacyPool) Filter(tx *types.Transaction) bool {
 // FilterType returns whether the legacy pool supports the given transaction type.
 func (pool *LegacyPool) FilterType(kind byte) bool {
 	switch kind {
-	case types.LegacyTxType, types.AccessListTxType, types.DynamicFeeTxType, types.SetCodeTxType:
+	case types.LegacyTxType, types.AccessListTxType, types.DynamicFeeTxType, types.SetCodeTxType,
+		types.InvokeTxType, types.RespondTxType, types.ComposeTypedTxType:
 		return true
 	default:
 		return false
@@ -643,6 +643,11 @@ func (pool *LegacyPool) ValidateTxBasics(tx *types.Transaction) error {
 			1<<types.AccessListTxType |
 			1<<types.DynamicFeeTxType |
 			1<<types.SetCodeTxType,
+		AcceptTypes: []byte{
+			types.InvokeTxType,
+			types.RespondTxType,
+			types.ComposeTypedTxType,
+		},
 		MaxSize:          txMaxSize,
 		MinTip:           pool.gasTip.Load().ToBig(),
 		EffectiveGasCeil: pool.config.EffectiveGasCeil,

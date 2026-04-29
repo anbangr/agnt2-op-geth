@@ -785,6 +785,31 @@ func (miner *Miner) fillTransactions(ctx context.Context, interrupt *atomic.Int3
 		telemetry.Int64Attribute("pending.blob.count", int64(blobTxCount)),
 	)
 
+	// Extract typed transactions (InvokeTx/RespondTx/ComposeTypedTx) from pendingPlainTxs
+	// before the prio/normal split. Typed txs are ordered separately via commitTypedTransactions.
+	var typedTxs []*types.Transaction
+	for addr, lazySlice := range pendingPlainTxs {
+		var remaining []*txpool.LazyTransaction
+		for _, lazy := range lazySlice {
+			tx := lazy.Resolve()
+			if tx == nil {
+				remaining = append(remaining, lazy)
+				continue
+			}
+			switch tx.Type() {
+			case types.InvokeTxType, types.RespondTxType, types.ComposeTypedTxType:
+				typedTxs = append(typedTxs, tx)
+			default:
+				remaining = append(remaining, lazy)
+			}
+		}
+		if len(remaining) == 0 {
+			delete(pendingPlainTxs, addr)
+		} else {
+			pendingPlainTxs[addr] = remaining
+		}
+	}
+
 	// Split the pending transactions into locals and remotes.
 	prioPlainTxs, normalPlainTxs := make(map[common.Address][]*txpool.LazyTransaction), pendingPlainTxs
 	prioBlobTxs, normalBlobTxs := make(map[common.Address][]*txpool.LazyTransaction), pendingBlobTxs
@@ -813,6 +838,11 @@ func (miner *Miner) fillTransactions(ctx context.Context, interrupt *atomic.Int3
 		blobTxs := newTransactionsByPriceAndNonce(env.signer, normalBlobTxs, env.header.BaseFee)
 
 		if err := miner.commitTransactions(ctx, env, plainTxs, blobTxs, interrupt); err != nil {
+			return err
+		}
+	}
+	if len(typedTxs) > 0 {
+		if err := miner.commitTypedTransactions(ctx, env, typedTxs); err != nil {
 			return err
 		}
 	}

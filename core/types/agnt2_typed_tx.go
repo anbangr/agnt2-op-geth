@@ -102,3 +102,28 @@ func (tx *Transaction) Agnt2IntrinsicGasSurcharge() uint64 {
 		return 0
 	}
 }
+
+func (tx *Transaction) ValidateAgnt2Envelope() error {
+	switch itx := tx.inner.(type) {
+	case *InvokeTx:
+		return itx.validate()
+	case *RespondTx:
+		return itx.validate()
+	default:
+		return nil
+	}
+}
+
+// Agnt2Dependencies returns the list of transaction hashes this transaction depends on.
+func (tx *Transaction) Agnt2Dependencies() []common.Hash {
+	switch itx := tx.inner.(type) {
+	case *InvokeTx:
+		return itx.DepInvokeIds
+	case *RespondTx:
+		return []common.Hash{itx.InvokeRef}
+	case *ComposeTypedTx:
+		return nil
+	default:
+		return nil
+	}
+}
