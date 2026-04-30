@@ -119,3 +119,38 @@ func TestValidateAGNT2TypedOpFields_InteractionOnlyCompatibility(t *testing.T) {
 	err := validateAGNT2TypedOpFields(header, nil)
 	require.NoError(t, err)
 }
+
+// TestValidateAGNT2TypedOpFields_BothInteractionAndTyped verifies that a
+// header with BOTH InteractionRoot/InteractionCount AND TypedOpRoot/TypedOpCount
+// set passes the typed-op validator (mixed-mode block — case 5 in the test
+// spec). The typed-op validator must operate independently of interaction
+// fields and accept the block as long as the typed-op fold matches.
+func TestValidateAGNT2TypedOpFields_BothInteractionAndTyped(t *testing.T) {
+	tx := newTestTypedTx(t, types.InvokeTxType)
+	txs := []*types.Transaction{tx}
+
+	gotRoot, gotCount := types.FoldTypedOpRoot(txs)
+
+	interRoot := common.HexToHash("0xaabbcc")
+	interCount := uint64(3)
+	header := &types.Header{
+		InteractionRoot:  &interRoot,
+		InteractionCount: &interCount,
+		TypedOpRoot:      &gotRoot,
+		TypedOpCount:     &gotCount,
+	}
+
+	err := validateAGNT2TypedOpFields(header, txs)
+	require.NoError(t, err)
+}
+
+// TestValidateAGNT2TypedOpFields_EmptyRootNoTypedTxs verifies that a block
+// carrying no typed transactions but with explicitly-omitted TypedOpRoot /
+// TypedOpCount fields (both nil) is accepted — the canonical encoding for
+// "no typed txs in this block" (case 2 in the test spec).
+func TestValidateAGNT2TypedOpFields_EmptyRootNoTypedTxs(t *testing.T) {
+	// Build a tx set that contains no typed txs at all — pass nil/empty.
+	header := &types.Header{}
+	err := validateAGNT2TypedOpFields(header, []*types.Transaction{})
+	require.NoError(t, err)
+}
