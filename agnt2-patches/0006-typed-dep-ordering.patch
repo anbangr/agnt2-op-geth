@@ -1,0 +1,660 @@
+diff --git a/core/types/agnt2_typed_tx.go b/core/types/agnt2_typed_tx.go
+index c83993c33..0fa5b4282 100644
+--- a/core/types/agnt2_typed_tx.go
++++ b/core/types/agnt2_typed_tx.go
+@@ -32,6 +32,7 @@ const (
+ )
+ 
+ var (
++	ErrAgnt2AgentRoleEmpty   = errors.New("agnt2 agent role must not be empty")
+ 	ErrAgnt2AgentRoleTooLong = errors.New("agnt2 agent role exceeds 64 bytes")
+ 	ErrAgnt2AgentRoleUTF8    = errors.New("agnt2 agent role must be valid UTF-8")
+ 	ErrAgnt2AgentRoleNFC     = errors.New("agnt2 agent role must be NFC-normalized")
+@@ -41,6 +42,9 @@ var (
+ )
+ 
+ func validateAgnt2AgentRole(role string) error {
++	if len(role) == 0 {
++		return ErrAgnt2AgentRoleEmpty
++	}
+ 	if len(role) > Agnt2MaxAgentRoleBytes {
+ 		return ErrAgnt2AgentRoleTooLong
+ 	}
+@@ -102,3 +106,45 @@ func (tx *Transaction) Agnt2IntrinsicGasSurcharge() uint64 {
+ 		return 0
+ 	}
+ }
++
++func (tx *Transaction) ValidateAgnt2Envelope() error {
++	switch itx := tx.inner.(type) {
++	case *InvokeTx:
++		return itx.validate()
++	case *RespondTx:
++		return itx.validate()
++	default:
++		return nil
++	}
++}
++
++type Agnt2OperationID struct {
++	Type       uint8
++	WorkflowId common.Hash
++	StepId     uint8
++}
++
++func (tx *Transaction) Agnt2OperationID() (Agnt2OperationID, bool) {
++	switch itx := tx.inner.(type) {
++	case *InvokeTx:
++		return Agnt2OperationID{Type: tx.Type(), WorkflowId: itx.WorkflowId, StepId: itx.StepId}, true
++	case *RespondTx:
++		return Agnt2OperationID{Type: tx.Type(), WorkflowId: itx.WorkflowId, StepId: itx.StepId}, true
++	default:
++		return Agnt2OperationID{}, false
++	}
++}
++
++// Agnt2Dependencies returns the list of transaction hashes this transaction depends on.
++func (tx *Transaction) Agnt2Dependencies() []common.Hash {
++	switch itx := tx.inner.(type) {
++	case *InvokeTx:
++		return itx.DepInvokeIds
++	case *RespondTx:
++		return []common.Hash{itx.InvokeRef}
++	case *ComposeTypedTx:
++		return nil
++	default:
++		return nil
++	}
++}
+diff --git a/miner/worker.go b/miner/worker.go
+index 382a7776a..ecd1209bc 100644
+--- a/miner/worker.go
++++ b/miner/worker.go
+@@ -785,6 +785,31 @@ func (miner *Miner) fillTransactions(ctx context.Context, interrupt *atomic.Int3
+ 		telemetry.Int64Attribute("pending.blob.count", int64(blobTxCount)),
+ 	)
+ 
++	// Extract typed transactions (InvokeTx/RespondTx/ComposeTypedTx) from pendingPlainTxs
++	// before the prio/normal split. Typed txs are ordered separately via commitTypedTransactions.
++	var typedTxs []*types.Transaction
++	for addr, lazySlice := range pendingPlainTxs {
++		var remaining []*txpool.LazyTransaction
++		for _, lazy := range lazySlice {
++			tx := lazy.Resolve()
++			if tx == nil {
++				remaining = append(remaining, lazy)
++				continue
++			}
++			switch tx.Type() {
++			case types.InvokeTxType, types.RespondTxType, types.ComposeTypedTxType:
++				typedTxs = append(typedTxs, tx)
++			default:
++				remaining = append(remaining, lazy)
++			}
++		}
++		if len(remaining) == 0 {
++			delete(pendingPlainTxs, addr)
++		} else {
++			pendingPlainTxs[addr] = remaining
++		}
++	}
++
+ 	// Split the pending transactions into locals and remotes.
+ 	prioPlainTxs, normalPlainTxs := make(map[common.Address][]*txpool.LazyTransaction), pendingPlainTxs
+ 	prioBlobTxs, normalBlobTxs := make(map[common.Address][]*txpool.LazyTransaction), pendingBlobTxs
+@@ -816,6 +841,11 @@ func (miner *Miner) fillTransactions(ctx context.Context, interrupt *atomic.Int3
+ 			return err
+ 		}
+ 	}
++	if len(typedTxs) > 0 {
++		if err := miner.commitTypedTransactions(ctx, env, typedTxs); err != nil {
++			return err
++		}
++	}
+ 	return nil
+ }
+ 
+diff --git a/miner/worker_typed.go b/miner/worker_typed.go
+new file mode 100644
+index 000000000..c924ce809
+--- /dev/null
++++ b/miner/worker_typed.go
+@@ -0,0 +1,134 @@
++package miner
++
++import (
++	"context"
++
++	"github.com/ethereum/go-ethereum/common"
++	"github.com/ethereum/go-ethereum/core/types"
++	"github.com/ethereum/go-ethereum/internal/agnt2debug"
++	"github.com/ethereum/go-ethereum/metrics"
++)
++
++// agnt2TypedTxDependencies is a package var so tests can exercise graph-only
++// cycles without constructing tx-hash fixed points.
++var agnt2TypedTxDependencies = func(tx *types.Transaction) []common.Hash {
++	return tx.Agnt2Dependencies()
++}
++
++// commitTypedTransactions sorts typed txs topologically and appends them to env.txs.
++// Execution is deferred to the precompile layer; this function enforces ordering at the
++// miner level (E4.3 prototype approach).
++func (miner *Miner) commitTypedTransactions(ctx context.Context, env *environment, txs []*types.Transaction) error {
++	_ = ctx // reserved for future cancellation propagation
++
++	cycleCount := metrics.GetOrRegisterCounter("miner/typedTx/cycle", nil)
++	missingDepCount := metrics.GetOrRegisterCounter("miner/typedTx/missingDep", nil)
++	crossBlockCount := metrics.GetOrRegisterCounter("miner/typedTx/crossBlockResolved", nil)
++	dupOpIdCount := metrics.GetOrRegisterCounter("miner/typedTx/duplicateOpId", nil)
++	staleNonceCount := metrics.GetOrRegisterCounter("miner/typedTx/staleNonce", nil)
++
++	// Phase 1: reject stale nonces and deduplicate by logical op id, preserving insertion order.
++	batchTxs := make(map[common.Hash]*types.Transaction)
++	var batchOrder []common.Hash
++	seenOpIds := make(map[types.Agnt2OperationID]common.Hash)
++
++	for _, tx := range txs {
++		from, err := types.Sender(env.signer, tx)
++		if err == nil && env.state.GetNonce(from) > tx.Nonce() {
++			staleNonceCount.Inc(1)
++			continue
++		}
++		h := tx.Hash()
++		if opId, ok := tx.Agnt2OperationID(); ok {
++			if _, exists := seenOpIds[opId]; exists {
++				dupOpIdCount.Inc(1)
++				continue
++			}
++			seenOpIds[opId] = h
++		}
++		if _, exists := batchTxs[h]; exists {
++			dupOpIdCount.Inc(1)
++			continue
++		}
++		batchTxs[h] = tx
++		batchOrder = append(batchOrder, h)
++	}
++
++	// Phase 2: build dependency graph (Kahn's) and identify deferred nodes.
++	adj := make(map[common.Hash][]common.Hash) // dep → slice of dependents
++	inDegree := make(map[common.Hash]int)
++	deferred := make(map[common.Hash]struct{}) // InvokeTx nodes whose dep is not in batch
++
++	for _, h := range batchOrder {
++		inDegree[h] = 0
++	}
++
++	for _, h := range batchOrder {
++		tx := batchTxs[h]
++		for _, dep := range agnt2TypedTxDependencies(tx) {
++			if _, exists := batchTxs[dep]; exists {
++				// Intra-batch dependency: add directed edge dep → h.
++				adj[dep] = append(adj[dep], h)
++				inDegree[h]++
++			} else {
++				// Dependency not present in this batch.
++				switch tx.Type() {
++				case types.InvokeTxType:
++					// InvokeTx with unresolved dep: defer to next block.
++					deferred[h] = struct{}{}
++					missingDepCount.Inc(1)
++				case types.RespondTxType, types.ComposeTypedTxType:
++					// Respond/Compose referencing a prior-block invoke: admit as cross-block resolved.
++					crossBlockCount.Inc(1)
++				}
++			}
++		}
++	}
++
++	// Phase 3: Kahn's BFS topological sort.
++	// Seed the queue with nodes that have inDegree==0 and are not deferred.
++	var queue []common.Hash
++	for _, h := range batchOrder {
++		if inDegree[h] == 0 {
++			if _, isDeferred := deferred[h]; !isDeferred {
++				queue = append(queue, h)
++			}
++		}
++	}
++
++	var sorted []*types.Transaction
++	for len(queue) > 0 {
++		curr := queue[0]
++		queue = queue[1:]
++		sorted = append(sorted, batchTxs[curr])
++
++		for _, neighbor := range adj[curr] {
++			inDegree[neighbor]--
++			if inDegree[neighbor] == 0 {
++				if _, isDeferred := deferred[neighbor]; !isDeferred {
++					queue = append(queue, neighbor)
++				}
++			}
++		}
++	}
++
++	// Phase 4: any node with inDegree > 0 after Kahn's is part of a cycle.
++	// Increment once per participating node.
++	for _, h := range batchOrder {
++		if inDegree[h] > 0 {
++			cycleCount.Inc(1)
++		}
++	}
++
++	// Phase 5: apply E4.6 bad-order injection if set for this block, then append.
++	// Actual execution is handled by the precompile in a later phase.
++	if swapIdx, ok := agnt2debug.GetBadOrder(env.header.Number.Uint64()); ok && len(swapIdx) == 2 {
++		i, j := swapIdx[0], swapIdx[1]
++		if i >= 0 && j >= 0 && i < len(sorted) && j < len(sorted) {
++			sorted[i], sorted[j] = sorted[j], sorted[i]
++		}
++	}
++	env.txs = append(env.txs, sorted...)
++
++	return nil
++}
+diff --git a/miner/worker_typed_test.go b/miner/worker_typed_test.go
+index c893b1764..b30c0445a 100644
+--- a/miner/worker_typed_test.go
++++ b/miner/worker_typed_test.go
+@@ -2,21 +2,29 @@ package miner
+ 
+ import (
+ 	"context"
++	"crypto/ecdsa"
+ 	"math/big"
+ 	"testing"
+ 
+ 	"github.com/ethereum/go-ethereum/common"
++	"github.com/ethereum/go-ethereum/core/state"
++	"github.com/ethereum/go-ethereum/core/tracing"
+ 	"github.com/ethereum/go-ethereum/core/types"
+ 	"github.com/ethereum/go-ethereum/crypto"
++	"github.com/ethereum/go-ethereum/internal/agnt2debug"
+ 	"github.com/ethereum/go-ethereum/metrics"
+ 	"github.com/stretchr/testify/require"
+ )
+ 
+ func newTestInvokeTx(workflowId common.Hash, stepId uint8, deps []common.Hash) *types.Transaction {
+ 	key, _ := crypto.GenerateKey()
++	return newTestInvokeTxWithKeyNonce(key, workflowId, stepId, 1, deps)
++}
++
++func newTestInvokeTxWithKeyNonce(key *ecdsa.PrivateKey, workflowId common.Hash, stepId uint8, nonce uint64, deps []common.Hash) *types.Transaction {
+ 	tx := &types.InvokeTx{
+ 		ChainID:      big.NewInt(9001),
+-		Nonce:        1,
++		Nonce:        nonce,
+ 		GasTipCap:    big.NewInt(1_000_000_000),
+ 		GasFeeCap:    big.NewInt(20_000_000_000),
+ 		Gas:          100000,
+@@ -48,139 +56,276 @@ func newTestRespondTx(workflowId common.Hash, stepId uint8, invokeRef common.Has
+ 	return signedTx
+ }
+ 
++func newTestComposeTypedTx(workflowId common.Hash, stepCount uint8) *types.Transaction {
++	key, _ := crypto.GenerateKey()
++	tx := &types.ComposeTypedTx{
++		ChainID:    big.NewInt(9001),
++		Nonce:      1,
++		GasTipCap:  big.NewInt(1_000_000_000),
++		GasFeeCap:  big.NewInt(20_000_000_000),
++		Gas:        100000,
++		WorkflowId: workflowId,
++		StepCount:  stepCount,
++		StepWorkflowRoots: []common.Hash{
++			common.HexToHash("0x0100000000000000000000000000000000000000000000000000000000000000"),
++			common.HexToHash("0x0200000000000000000000000000000000000000000000000000000000000000"),
++		}[:stepCount],
++		Payouts: []*big.Int{big.NewInt(1), big.NewInt(2)}[:stepCount],
++	}
++	signedTx, _ := types.SignNewTx(key, types.LatestSignerForChainID(big.NewInt(9001)), tx)
++	return signedTx
++}
++
+ func setupTypedEnv(t *testing.T) (*Miner, *environment) {
+ 	miner := createMiner(t)
++	st, _ := state.New(types.EmptyRootHash, state.NewDatabaseForTesting())
+ 	env := &environment{
+-		signer:   types.LatestSigner(miner.chainConfig),
+-		header:   &types.Header{},
++		signer:   types.LatestSignerForChainID(big.NewInt(9001)),
++		state:    st,
++		header:   &types.Header{Number: big.NewInt(1)},
+ 		txs:      make([]*types.Transaction, 0),
+ 		receipts: make([]*types.Receipt, 0),
+ 	}
+ 	return miner, env
+ }
+ 
+-// 1. Scrambled INVOKE/RESPOND/COMPOSE-typed → correct topological order
+-func TestTypedDepOrdering_TopologicalSort(t *testing.T) {
++// TestCommitTypedTransactions_TopologicalOrder verifies that scrambled typed txs are
++// appended to env.txs in correct dependency order after topological sort.
++func TestCommitTypedTransactions_TopologicalOrder(t *testing.T) {
+ 	miner, env := setupTypedEnv(t)
+-	
+-	wfId := common.HexToHash("0x111")
+-	tx1 := newTestInvokeTx(wfId, 1, nil)
++	ctx := context.Background()
++
++	wfId := common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000001")
++	tx1 := newTestInvokeTx(wfId, 1, []common.Hash{})
+ 	tx2 := newTestInvokeTx(wfId, 2, []common.Hash{tx1.Hash()})
+-	tx3 := newTestRespondTx(wfId, 2, tx2.Hash())
+ 
+-	// Scrambled order
+-	txs := []*types.Transaction{tx3, tx2, tx1}
+-	
+-	err := miner.commitTypedTransactions(context.Background(), env, txs)
++	// Submit in reverse order: tx2 first, tx1 second.
++	err := miner.commitTypedTransactions(ctx, env, []*types.Transaction{tx2, tx1})
+ 	require.NoError(t, err)
+ 
+-	require.Equal(t, 3, len(env.txs), "Expected 3 transactions to be committed")
+-	require.Equal(t, tx1.Hash(), env.txs[0].Hash(), "Tx1 should be first")
+-	require.Equal(t, tx2.Hash(), env.txs[1].Hash(), "Tx2 should be second")
+-	require.Equal(t, tx3.Hash(), env.txs[2].Hash(), "Tx3 should be third")
++	require.Len(t, env.txs, 2)
++	require.Equal(t, tx1.Hash(), env.txs[0].Hash(), "tx1 (no deps) must come first")
++	require.Equal(t, tx2.Hash(), env.txs[1].Hash(), "tx2 (depends on tx1) must come second")
+ }
+ 
+-// 2. Cycle detection → reject offending tx + cycle_count increment
+-func TestTypedDepOrdering_CycleDetection(t *testing.T) {
++// TestCommitTypedTransactions_MixedTypedOrder verifies a scrambled mixed batch admits
++// InvokeTx, RespondTx, and ComposeTypedTx while preserving the Invoke -> Respond edge.
++func TestCommitTypedTransactions_MixedTypedOrder(t *testing.T) {
+ 	miner, env := setupTypedEnv(t)
+-	
+-	cycleCount := metrics.GetOrRegisterCounter("miner/typedTx/cycle", nil)
+-	initialCount := cycleCount.Load()
++	ctx := context.Background()
+ 
+-	wfId := common.HexToHash("0x222")
+-	tx1 := newTestInvokeTx(wfId, 1, nil) 
+-	tx2 := newTestInvokeTx(wfId, 2, []common.Hash{tx1.Hash()})
+-	
+-	// Create a new tx1 that depends on tx2 to form a cycle
+-	tx1Cyclic := newTestInvokeTx(wfId, 1, []common.Hash{tx2.Hash()})
+-	
+-	txs := []*types.Transaction{tx1Cyclic, tx2}
+-	
+-	err := miner.commitTypedTransactions(context.Background(), env, txs)
++	wfId := common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000011")
++	invokeTx := newTestInvokeTx(wfId, 1, []common.Hash{})
++	respondTx := newTestRespondTx(wfId, 2, invokeTx.Hash())
++	composeTx := newTestComposeTypedTx(wfId, 2)
++
++	err := miner.commitTypedTransactions(ctx, env, []*types.Transaction{respondTx, composeTx, invokeTx})
++	require.NoError(t, err)
++
++	require.Len(t, env.txs, 3)
++	positions := make(map[common.Hash]int)
++	for i, tx := range env.txs {
++		positions[tx.Hash()] = i
++	}
++	require.Less(t, positions[invokeTx.Hash()], positions[respondTx.Hash()], "RespondTx must follow its InvokeTx")
++	require.Contains(t, positions, composeTx.Hash(), "ComposeTypedTx is independent in E4.3 and must still be admitted")
++}
++
++// TestCommitTypedTransactions_CycleDetection verifies the graph cycle path. Real
++// tx-hash cycles are cryptographic fixed points, so the dependency hook injects
++// the graph shape while still exercising commitTypedTransactions counters/output.
++func TestCommitTypedTransactions_CycleDetection(t *testing.T) {
++	miner, env := setupTypedEnv(t)
++	ctx := context.Background()
++
++	wfId := common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000012")
++	tx1 := newTestInvokeTx(wfId, 1, []common.Hash{})
++	tx2 := newTestInvokeTx(wfId, 2, []common.Hash{})
++
++	oldDeps := agnt2TypedTxDependencies
++	agnt2TypedTxDependencies = func(tx *types.Transaction) []common.Hash {
++		switch tx.Hash() {
++		case tx1.Hash():
++			return []common.Hash{tx2.Hash()}
++		case tx2.Hash():
++			return []common.Hash{tx1.Hash()}
++		default:
++			return oldDeps(tx)
++		}
++	}
++	defer func() { agnt2TypedTxDependencies = oldDeps }()
++
++	counter := metrics.GetOrRegisterCounter("miner/typedTx/cycle", nil)
++	counter.Clear()
++
++	err := miner.commitTypedTransactions(ctx, env, []*types.Transaction{tx1, tx2})
++	require.NoError(t, err)
++
++	require.Len(t, env.txs, 0, "cycle members must not be admitted")
++	require.EqualValues(t, 2, metrics.GetOrRegisterCounter("miner/typedTx/cycle", nil).Load())
++}
++
++// TestCommitTypedTransactions_MissingDepDeferred verifies that an InvokeTx whose dep
++// is absent from the batch is deferred (not admitted) and missingDep counter increments.
++func TestCommitTypedTransactions_MissingDepDeferred(t *testing.T) {
++	miner, env := setupTypedEnv(t)
++	ctx := context.Background()
++
++	wfId := common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000002")
++	missingHash := common.HexToHash("0xdeadbeef00000000000000000000000000000000000000000000000000000000")
++	tx1 := newTestInvokeTx(wfId, 1, []common.Hash{missingHash})
++
++	counter := metrics.GetOrRegisterCounter("miner/typedTx/missingDep", nil)
++	counter.Clear()
++
++	err := miner.commitTypedTransactions(ctx, env, []*types.Transaction{tx1})
++	require.NoError(t, err)
++
++	require.Len(t, env.txs, 0, "tx with missing dep must be deferred, not admitted")
++	require.EqualValues(t, 1, metrics.GetOrRegisterCounter("miner/typedTx/missingDep", nil).Load())
++}
++
++// TestCommitTypedTransactions_RespondTxCrossBlock verifies that a RespondTx whose
++// InvokeRef is not in the batch is admitted (cross-block resolved) and the counter increments.
++func TestCommitTypedTransactions_RespondTxCrossBlock(t *testing.T) {
++	miner, env := setupTypedEnv(t)
++	ctx := context.Background()
++
++	wfId := common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000003")
++	invokeRef := common.HexToHash("0xabcd123400000000000000000000000000000000000000000000000000000000")
++	respondTx := newTestRespondTx(wfId, 1, invokeRef)
++
++	counter := metrics.GetOrRegisterCounter("miner/typedTx/crossBlockResolved", nil)
++	counter.Clear()
++
++	err := miner.commitTypedTransactions(ctx, env, []*types.Transaction{respondTx})
+ 	require.NoError(t, err)
+-	
+-	require.Equal(t, initialCount+1, cycleCount.Load(), "Expected cycle_count to increment")
+-	require.Equal(t, 0, len(env.txs), "Expected transactions to be rejected due to cycle")
++
++	require.Len(t, env.txs, 1, "RespondTx with prior-block invokeRef must be admitted")
++	require.EqualValues(t, 1, metrics.GetOrRegisterCounter("miner/typedTx/crossBlockResolved", nil).Load())
+ }
+ 
+-// 3. Missing-dep → defer to next block + missing_dep_count increment
+-func TestTypedDepOrdering_MissingDep(t *testing.T) {
++// TestCommitTypedTransactions_DuplicateDeduped verifies that submitting the same tx twice
++// results in only one admission and increments the duplicateOpId counter.
++func TestCommitTypedTransactions_DuplicateDeduped(t *testing.T) {
+ 	miner, env := setupTypedEnv(t)
+-	
+-	missingDepCount := metrics.GetOrRegisterCounter("miner/typedTx/missingDep", nil)
+-	initialCount := missingDepCount.Load()
++	ctx := context.Background()
+ 
+-	wfId := common.HexToHash("0x333")
+-	tx1 := newTestInvokeTx(wfId, 1, []common.Hash{common.HexToHash("0xmissing")})
++	wfId := common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000004")
++	tx1 := newTestInvokeTx(wfId, 1, []common.Hash{})
+ 
+-	txs := []*types.Transaction{tx1}
+-	
+-	err := miner.commitTypedTransactions(context.Background(), env, txs)
++	counter := metrics.GetOrRegisterCounter("miner/typedTx/duplicateOpId", nil)
++	counter.Clear()
++
++	err := miner.commitTypedTransactions(ctx, env, []*types.Transaction{tx1, tx1})
+ 	require.NoError(t, err)
+ 
+-	require.Equal(t, initialCount+1, missingDepCount.Load(), "Expected missing_dep_count to increment")
+-	require.Equal(t, 0, len(env.txs), "Expected transaction to be deferred")
++	require.Len(t, env.txs, 1, "duplicate tx must be deduplicated to one entry")
++	require.EqualValues(t, 1, metrics.GetOrRegisterCounter("miner/typedTx/duplicateOpId", nil).Load())
+ }
+ 
+-// 4. Cross-block resolved (InvokeRef in prior block) → admit + cross_block_resolved_count increment
+-func TestTypedDepOrdering_CrossBlockResolved(t *testing.T) {
++// TestCommitTypedTransactions_DuplicateLogicalOpIdDeduped verifies that two distinct
++// signed txs with the same typed operation id admit only the first one.
++func TestCommitTypedTransactions_DuplicateLogicalOpIdDeduped(t *testing.T) {
+ 	miner, env := setupTypedEnv(t)
+-	
+-	crossBlockCount := metrics.GetOrRegisterCounter("miner/typedTx/crossBlockResolved", nil)
+-	initialCount := crossBlockCount.Load()
+-
+-	wfId := common.HexToHash("0x444")
+-	// The state should ideally indicate this invoke is resolved, 
+-	// but the test asserts the metrics increment regardless.
+-	tx1 := newTestRespondTx(wfId, 1, common.HexToHash("0xpriorblock"))
+-
+-	txs := []*types.Transaction{tx1}
+-	
+-	err := miner.commitTypedTransactions(context.Background(), env, txs)
++	ctx := context.Background()
++
++	wfId := common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000013")
++	key1, _ := crypto.GenerateKey()
++	key2, _ := crypto.GenerateKey()
++	tx1 := newTestInvokeTxWithKeyNonce(key1, wfId, 1, 1, []common.Hash{})
++	tx2 := newTestInvokeTxWithKeyNonce(key2, wfId, 1, 2, []common.Hash{})
++	require.NotEqual(t, tx1.Hash(), tx2.Hash(), "test must use distinct signed transactions")
++
++	counter := metrics.GetOrRegisterCounter("miner/typedTx/duplicateOpId", nil)
++	counter.Clear()
++
++	err := miner.commitTypedTransactions(ctx, env, []*types.Transaction{tx1, tx2})
+ 	require.NoError(t, err)
+ 
+-	require.Equal(t, initialCount+1, crossBlockCount.Load(), "Expected cross_block_resolved_count to increment")
+-	require.Equal(t, 1, len(env.txs), "Expected transaction to be admitted")
++	require.Len(t, env.txs, 1, "duplicate logical op id must admit only one tx")
++	require.Equal(t, tx1.Hash(), env.txs[0].Hash())
++	require.EqualValues(t, 1, metrics.GetOrRegisterCounter("miner/typedTx/duplicateOpId", nil).Load())
+ }
+ 
+-// 5. Duplicate op id collision → reject + duplicate_op_id_count increment
+-func TestTypedDepOrdering_DuplicateOpId(t *testing.T) {
++// TestCommitTypedTransactions_AllAdmittedNoDeps verifies that txs with no dependencies
++// are all admitted.
++func TestCommitTypedTransactions_AllAdmittedNoDeps(t *testing.T) {
+ 	miner, env := setupTypedEnv(t)
+-	
+-	dupOpIdCount := metrics.GetOrRegisterCounter("miner/typedTx/duplicateOpId", nil)
+-	initialCount := dupOpIdCount.Load()
++	ctx := context.Background()
+ 
+-	wfId := common.HexToHash("0x555")
+-	tx1 := newTestInvokeTx(wfId, 1, nil)
+-	tx2 := tx1 // duplicate transaction with same op id (hash)
++	wfId := common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000005")
++	tx1 := newTestInvokeTx(wfId, 1, []common.Hash{})
++	tx2 := newTestInvokeTx(wfId, 2, []common.Hash{})
++	tx3 := newTestInvokeTx(wfId, 3, []common.Hash{})
+ 
+-	txs := []*types.Transaction{tx1, tx2}
+-	
+-	err := miner.commitTypedTransactions(context.Background(), env, txs)
++	err := miner.commitTypedTransactions(ctx, env, []*types.Transaction{tx1, tx2, tx3})
+ 	require.NoError(t, err)
+ 
+-	require.Equal(t, initialCount+1, dupOpIdCount.Load(), "Expected duplicate_op_id_count to increment")
+-	require.Equal(t, 1, len(env.txs), "Expected only the first transaction to be admitted")
++	require.Len(t, env.txs, 3, "all three independent txs must be admitted")
+ }
+ 
+-// 6. Stale nonce → reject + stale_nonce_count increment
+-func TestTypedDepOrdering_StaleNonce(t *testing.T) {
++// TestCommitTypedTransactions_StaleNonce verifies that a typed tx below the
++// sender's state nonce is rejected and increments staleNonce.
++func TestCommitTypedTransactions_StaleNonce(t *testing.T) {
+ 	miner, env := setupTypedEnv(t)
+-	
+-	staleNonceCount := metrics.GetOrRegisterCounter("miner/typedTx/staleNonce", nil)
+-	initialCount := staleNonceCount.Load()
+-
+-	wfId := common.HexToHash("0x666")
+-	tx1 := newTestInvokeTx(wfId, 1, nil)
+-	// We simulate a stale nonce by marking it as such in the env state or expecting it to fail.
+-	// For the sake of test coverage, the implementation will increment this.
+-
+-	txs := []*types.Transaction{tx1}
+-	
+-	// Assume state contains higher nonce
+-	
+-	err := miner.commitTypedTransactions(context.Background(), env, txs)
++	ctx := context.Background()
++
++	wfId := common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000006")
++	key, _ := crypto.GenerateKey()
++	tx1 := newTestInvokeTxWithKeyNonce(key, wfId, 1, 1, []common.Hash{})
++	sender, err := types.Sender(env.signer, tx1)
+ 	require.NoError(t, err)
++	env.state.SetNonce(sender, tx1.Nonce()+1, tracing.NonceChangeUnspecified)
+ 
+-	require.Equal(t, initialCount+1, staleNonceCount.Load(), "Expected stale_nonce_count to increment")
++	counter := metrics.GetOrRegisterCounter("miner/typedTx/staleNonce", nil)
++	counter.Clear()
++
++	err = miner.commitTypedTransactions(ctx, env, []*types.Transaction{tx1})
++	require.NoError(t, err)
++
++	require.Len(t, env.txs, 0, "stale nonce tx must not be admitted")
++	require.EqualValues(t, 1, metrics.GetOrRegisterCounter("miner/typedTx/staleNonce", nil).Load())
++}
++
++// TestCommitTypedTransactions_BadOrderSwap verifies the E4.6 bad-order injection path:
++// when agnt2debug.SetBadOrder is called for a block, commitTypedTransactions swaps
++// the two entries at the given indices in the topologically-sorted output.
++func TestCommitTypedTransactions_BadOrderSwap(t *testing.T) {
++	miner, env := setupTypedEnv(t)
++	ctx := context.Background()
++
++	// Use block 9999 so this test cannot interfere with other tests.
++	blockNum := uint64(9999)
++	env.header.Number = big.NewInt(int64(blockNum))
++
++	wfId := common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000007")
++	tx1 := newTestInvokeTx(wfId, 1, []common.Hash{})
++	tx2 := newTestInvokeTx(wfId, 2, []common.Hash{tx1.Hash()})
++
++	// Without injection, topological order places tx1 before tx2.
++	err := miner.commitTypedTransactions(ctx, env, []*types.Transaction{tx2, tx1})
++	require.NoError(t, err)
++	require.Len(t, env.txs, 2)
++	naturalFirst := env.txs[0].Hash()
++	naturalSecond := env.txs[1].Hash()
++	require.Equal(t, tx1.Hash(), naturalFirst, "tx1 (no deps) must be first in natural order")
++
++	// Reset env and inject bad order for the same block — indices [0,1] swap positions 0 and 1.
++	env.txs = env.txs[:0]
++	agnt2debug.SetBadOrder(blockNum, []int{0, 1})
++
++	err = miner.commitTypedTransactions(ctx, env, []*types.Transaction{tx2, tx1})
++	require.NoError(t, err)
++	require.Len(t, env.txs, 2)
++
++	// After swap, the order must be inverted relative to natural topological order.
++	require.Equal(t, naturalSecond, env.txs[0].Hash(), "swap must move position-1 to position-0")
++	require.Equal(t, naturalFirst, env.txs[1].Hash(), "swap must move position-0 to position-1")
++
++	// Consume-once: a second run without re-injection must restore natural order.
++	env.txs = env.txs[:0]
++	err = miner.commitTypedTransactions(ctx, env, []*types.Transaction{tx2, tx1})
++	require.NoError(t, err)
++	require.Equal(t, naturalFirst, env.txs[0].Hash(), "no injection on second run — natural order restored")
+ }

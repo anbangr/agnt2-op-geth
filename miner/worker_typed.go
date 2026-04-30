@@ -9,6 +9,12 @@ import (
 	"github.com/ethereum/go-ethereum/metrics"
 )
 
+// agnt2TypedTxDependencies is a package var so tests can exercise graph-only
+// cycles without constructing tx-hash fixed points.
+var agnt2TypedTxDependencies = func(tx *types.Transaction) []common.Hash {
+	return tx.Agnt2Dependencies()
+}
+
 // commitTypedTransactions sorts typed txs topologically and appends them to env.txs.
 // Execution is deferred to the precompile layer; this function enforces ordering at the
 // miner level (E4.3 prototype approach).
@@ -20,14 +26,26 @@ func (miner *Miner) commitTypedTransactions(ctx context.Context, env *environmen
 	crossBlockCount := metrics.GetOrRegisterCounter("miner/typedTx/crossBlockResolved", nil)
 	dupOpIdCount := metrics.GetOrRegisterCounter("miner/typedTx/duplicateOpId", nil)
 	staleNonceCount := metrics.GetOrRegisterCounter("miner/typedTx/staleNonce", nil)
-	_ = staleNonceCount // not incremented in E4.3 prototype (no commitTransaction call)
 
-	// Phase 1: deduplicate by tx hash, preserving insertion order.
+	// Phase 1: reject stale nonces and deduplicate by logical op id, preserving insertion order.
 	batchTxs := make(map[common.Hash]*types.Transaction)
 	var batchOrder []common.Hash
+	seenOpIds := make(map[types.Agnt2OperationID]common.Hash)
 
 	for _, tx := range txs {
+		from, err := types.Sender(env.signer, tx)
+		if err == nil && env.state.GetNonce(from) > tx.Nonce() {
+			staleNonceCount.Inc(1)
+			continue
+		}
 		h := tx.Hash()
+		if opId, ok := tx.Agnt2OperationID(); ok {
+			if _, exists := seenOpIds[opId]; exists {
+				dupOpIdCount.Inc(1)
+				continue
+			}
+			seenOpIds[opId] = h
+		}
 		if _, exists := batchTxs[h]; exists {
 			dupOpIdCount.Inc(1)
 			continue
@@ -47,7 +65,7 @@ func (miner *Miner) commitTypedTransactions(ctx context.Context, env *environmen
 
 	for _, h := range batchOrder {
 		tx := batchTxs[h]
-		for _, dep := range tx.Agnt2Dependencies() {
+		for _, dep := range agnt2TypedTxDependencies(tx) {
 			if _, exists := batchTxs[dep]; exists {
 				// Intra-batch dependency: add directed edge dep → h.
 				adj[dep] = append(adj[dep], h)

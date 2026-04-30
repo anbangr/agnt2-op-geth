@@ -118,6 +118,23 @@ func (tx *Transaction) ValidateAgnt2Envelope() error {
 	}
 }
 
+type Agnt2OperationID struct {
+	Type       uint8
+	WorkflowId common.Hash
+	StepId     uint8
+}
+
+func (tx *Transaction) Agnt2OperationID() (Agnt2OperationID, bool) {
+	switch itx := tx.inner.(type) {
+	case *InvokeTx:
+		return Agnt2OperationID{Type: tx.Type(), WorkflowId: itx.WorkflowId, StepId: itx.StepId}, true
+	case *RespondTx:
+		return Agnt2OperationID{Type: tx.Type(), WorkflowId: itx.WorkflowId, StepId: itx.StepId}, true
+	default:
+		return Agnt2OperationID{}, false
+	}
+}
+
 // Agnt2Dependencies returns the list of transaction hashes this transaction depends on.
 func (tx *Transaction) Agnt2Dependencies() []common.Hash {
 	switch itx := tx.inner.(type) {

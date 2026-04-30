@@ -2,11 +2,13 @@ package miner
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"math/big"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/state"
+	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/internal/agnt2debug"
@@ -16,9 +18,13 @@ import (
 
 func newTestInvokeTx(workflowId common.Hash, stepId uint8, deps []common.Hash) *types.Transaction {
 	key, _ := crypto.GenerateKey()
+	return newTestInvokeTxWithKeyNonce(key, workflowId, stepId, 1, deps)
+}
+
+func newTestInvokeTxWithKeyNonce(key *ecdsa.PrivateKey, workflowId common.Hash, stepId uint8, nonce uint64, deps []common.Hash) *types.Transaction {
 	tx := &types.InvokeTx{
 		ChainID:      big.NewInt(9001),
-		Nonce:        1,
+		Nonce:        nonce,
 		GasTipCap:    big.NewInt(1_000_000_000),
 		GasFeeCap:    big.NewInt(20_000_000_000),
 		Gas:          100000,
@@ -50,13 +56,33 @@ func newTestRespondTx(workflowId common.Hash, stepId uint8, invokeRef common.Has
 	return signedTx
 }
 
+func newTestComposeTypedTx(workflowId common.Hash, stepCount uint8) *types.Transaction {
+	key, _ := crypto.GenerateKey()
+	tx := &types.ComposeTypedTx{
+		ChainID:    big.NewInt(9001),
+		Nonce:      1,
+		GasTipCap:  big.NewInt(1_000_000_000),
+		GasFeeCap:  big.NewInt(20_000_000_000),
+		Gas:        100000,
+		WorkflowId: workflowId,
+		StepCount:  stepCount,
+		StepWorkflowRoots: []common.Hash{
+			common.HexToHash("0x0100000000000000000000000000000000000000000000000000000000000000"),
+			common.HexToHash("0x0200000000000000000000000000000000000000000000000000000000000000"),
+		}[:stepCount],
+		Payouts: []*big.Int{big.NewInt(1), big.NewInt(2)}[:stepCount],
+	}
+	signedTx, _ := types.SignNewTx(key, types.LatestSignerForChainID(big.NewInt(9001)), tx)
+	return signedTx
+}
+
 func setupTypedEnv(t *testing.T) (*Miner, *environment) {
 	miner := createMiner(t)
 	st, _ := state.New(types.EmptyRootHash, state.NewDatabaseForTesting())
 	env := &environment{
-		signer:   types.LatestSigner(miner.chainConfig),
+		signer:   types.LatestSignerForChainID(big.NewInt(9001)),
 		state:    st,
-		header:   &types.Header{},
+		header:   &types.Header{Number: big.NewInt(1)},
 		txs:      make([]*types.Transaction, 0),
 		receipts: make([]*types.Receipt, 0),
 	}
@@ -80,6 +106,63 @@ func TestCommitTypedTransactions_TopologicalOrder(t *testing.T) {
 	require.Len(t, env.txs, 2)
 	require.Equal(t, tx1.Hash(), env.txs[0].Hash(), "tx1 (no deps) must come first")
 	require.Equal(t, tx2.Hash(), env.txs[1].Hash(), "tx2 (depends on tx1) must come second")
+}
+
+// TestCommitTypedTransactions_MixedTypedOrder verifies a scrambled mixed batch admits
+// InvokeTx, RespondTx, and ComposeTypedTx while preserving the Invoke -> Respond edge.
+func TestCommitTypedTransactions_MixedTypedOrder(t *testing.T) {
+	miner, env := setupTypedEnv(t)
+	ctx := context.Background()
+
+	wfId := common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000011")
+	invokeTx := newTestInvokeTx(wfId, 1, []common.Hash{})
+	respondTx := newTestRespondTx(wfId, 2, invokeTx.Hash())
+	composeTx := newTestComposeTypedTx(wfId, 2)
+
+	err := miner.commitTypedTransactions(ctx, env, []*types.Transaction{respondTx, composeTx, invokeTx})
+	require.NoError(t, err)
+
+	require.Len(t, env.txs, 3)
+	positions := make(map[common.Hash]int)
+	for i, tx := range env.txs {
+		positions[tx.Hash()] = i
+	}
+	require.Less(t, positions[invokeTx.Hash()], positions[respondTx.Hash()], "RespondTx must follow its InvokeTx")
+	require.Contains(t, positions, composeTx.Hash(), "ComposeTypedTx is independent in E4.3 and must still be admitted")
+}
+
+// TestCommitTypedTransactions_CycleDetection verifies the graph cycle path. Real
+// tx-hash cycles are cryptographic fixed points, so the dependency hook injects
+// the graph shape while still exercising commitTypedTransactions counters/output.
+func TestCommitTypedTransactions_CycleDetection(t *testing.T) {
+	miner, env := setupTypedEnv(t)
+	ctx := context.Background()
+
+	wfId := common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000012")
+	tx1 := newTestInvokeTx(wfId, 1, []common.Hash{})
+	tx2 := newTestInvokeTx(wfId, 2, []common.Hash{})
+
+	oldDeps := agnt2TypedTxDependencies
+	agnt2TypedTxDependencies = func(tx *types.Transaction) []common.Hash {
+		switch tx.Hash() {
+		case tx1.Hash():
+			return []common.Hash{tx2.Hash()}
+		case tx2.Hash():
+			return []common.Hash{tx1.Hash()}
+		default:
+			return oldDeps(tx)
+		}
+	}
+	defer func() { agnt2TypedTxDependencies = oldDeps }()
+
+	counter := metrics.GetOrRegisterCounter("miner/typedTx/cycle", nil)
+	counter.Clear()
+
+	err := miner.commitTypedTransactions(ctx, env, []*types.Transaction{tx1, tx2})
+	require.NoError(t, err)
+
+	require.Len(t, env.txs, 0, "cycle members must not be admitted")
+	require.EqualValues(t, 2, metrics.GetOrRegisterCounter("miner/typedTx/cycle", nil).Load())
 }
 
 // TestCommitTypedTransactions_MissingDepDeferred verifies that an InvokeTx whose dep
@@ -141,6 +224,30 @@ func TestCommitTypedTransactions_DuplicateDeduped(t *testing.T) {
 	require.EqualValues(t, 1, metrics.GetOrRegisterCounter("miner/typedTx/duplicateOpId", nil).Load())
 }
 
+// TestCommitTypedTransactions_DuplicateLogicalOpIdDeduped verifies that two distinct
+// signed txs with the same typed operation id admit only the first one.
+func TestCommitTypedTransactions_DuplicateLogicalOpIdDeduped(t *testing.T) {
+	miner, env := setupTypedEnv(t)
+	ctx := context.Background()
+
+	wfId := common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000013")
+	key1, _ := crypto.GenerateKey()
+	key2, _ := crypto.GenerateKey()
+	tx1 := newTestInvokeTxWithKeyNonce(key1, wfId, 1, 1, []common.Hash{})
+	tx2 := newTestInvokeTxWithKeyNonce(key2, wfId, 1, 2, []common.Hash{})
+	require.NotEqual(t, tx1.Hash(), tx2.Hash(), "test must use distinct signed transactions")
+
+	counter := metrics.GetOrRegisterCounter("miner/typedTx/duplicateOpId", nil)
+	counter.Clear()
+
+	err := miner.commitTypedTransactions(ctx, env, []*types.Transaction{tx1, tx2})
+	require.NoError(t, err)
+
+	require.Len(t, env.txs, 1, "duplicate logical op id must admit only one tx")
+	require.Equal(t, tx1.Hash(), env.txs[0].Hash())
+	require.EqualValues(t, 1, metrics.GetOrRegisterCounter("miner/typedTx/duplicateOpId", nil).Load())
+}
+
 // TestCommitTypedTransactions_AllAdmittedNoDeps verifies that txs with no dependencies
 // are all admitted.
 func TestCommitTypedTransactions_AllAdmittedNoDeps(t *testing.T) {
@@ -158,22 +265,27 @@ func TestCommitTypedTransactions_AllAdmittedNoDeps(t *testing.T) {
 	require.Len(t, env.txs, 3, "all three independent txs must be admitted")
 }
 
-// TestCommitTypedTransactions_StaleNonce verifies that a tx with no deps is admitted
-// (staleNonce counter is not incremented in the E4.3 prototype since commitTransaction
-// is not called — this test confirms the tx IS admitted, not rejected).
+// TestCommitTypedTransactions_StaleNonce verifies that a typed tx below the
+// sender's state nonce is rejected and increments staleNonce.
 func TestCommitTypedTransactions_StaleNonce(t *testing.T) {
 	miner, env := setupTypedEnv(t)
 	ctx := context.Background()
 
 	wfId := common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000006")
-	tx1 := newTestInvokeTx(wfId, 1, []common.Hash{})
+	key, _ := crypto.GenerateKey()
+	tx1 := newTestInvokeTxWithKeyNonce(key, wfId, 1, 1, []common.Hash{})
+	sender, err := types.Sender(env.signer, tx1)
+	require.NoError(t, err)
+	env.state.SetNonce(sender, tx1.Nonce()+1, tracing.NonceChangeUnspecified)
 
-	err := miner.commitTypedTransactions(ctx, env, []*types.Transaction{tx1})
+	counter := metrics.GetOrRegisterCounter("miner/typedTx/staleNonce", nil)
+	counter.Clear()
+
+	err = miner.commitTypedTransactions(ctx, env, []*types.Transaction{tx1})
 	require.NoError(t, err)
 
-	// In E4.3 prototype, commitTransaction is not called so staleNonce is never triggered.
-	// Verify the tx is admitted to env.txs.
-	require.Len(t, env.txs, 1, "tx must be admitted (staleNonce not checked in E4.3 prototype)")
+	require.Len(t, env.txs, 0, "stale nonce tx must not be admitted")
+	require.EqualValues(t, 1, metrics.GetOrRegisterCounter("miner/typedTx/staleNonce", nil).Load())
 }
 
 // TestCommitTypedTransactions_BadOrderSwap verifies the E4.6 bad-order injection path:
