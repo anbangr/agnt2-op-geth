@@ -18,15 +18,15 @@ func newTestTypedTx(t *testing.T, txType byte) *types.Transaction {
 	switch txType {
 	case types.InvokeTxType:
 		inner = &types.InvokeTx{
-			ChainID:   big.NewInt(9001),
-			Nonce:     1,
-			GasTipCap: big.NewInt(1_000_000_000),
-			GasFeeCap: big.NewInt(20_000_000_000),
-			Gas:       100000,
+			ChainID:    big.NewInt(9001),
+			Nonce:      1,
+			GasTipCap:  big.NewInt(1_000_000_000),
+			GasFeeCap:  big.NewInt(20_000_000_000),
+			Gas:        100000,
 			WorkflowId: common.HexToHash("0x01"),
-			StepId:    1,
-			AgentRole: "worker",
-			Payload:   common.FromHex("0xdeadbeef"),
+			StepId:     1,
+			AgentRole:  "worker",
+			Payload:    common.FromHex("0xdeadbeef"),
 		}
 	case types.RespondTxType:
 		inner = &types.RespondTx{
@@ -152,5 +152,52 @@ func TestValidateAGNT2TypedOpFields_EmptyRootNoTypedTxs(t *testing.T) {
 	// Build a tx set that contains no typed txs at all — pass nil/empty.
 	header := &types.Header{}
 	err := validateAGNT2TypedOpFields(header, []*types.Transaction{})
+	require.NoError(t, err)
+}
+
+func TestValidateAGNT2TypedOpOrder_SameBlockDependency(t *testing.T) {
+	key, err := crypto.GenerateKey()
+	require.NoError(t, err)
+	signer := types.LatestSignerForChainID(big.NewInt(9001))
+	workflowID := common.HexToHash("0x0200")
+
+	invoke, err := types.SignNewTx(key, signer, &types.InvokeTx{
+		ChainID:      big.NewInt(9001),
+		Nonce:        0,
+		GasTipCap:    big.NewInt(1_000_000_000),
+		GasFeeCap:    big.NewInt(20_000_000_000),
+		Gas:          100000,
+		WorkflowId:   workflowID,
+		StepId:       1,
+		AgentRole:    "worker-parent",
+		DepInvokeIds: []common.Hash{},
+		Payload:      common.FromHex("0xdeadbeef"),
+	})
+	require.NoError(t, err)
+
+	respond, err := types.SignNewTx(key, signer, &types.RespondTx{
+		ChainID:         big.NewInt(9001),
+		Nonce:           1,
+		GasTipCap:       big.NewInt(1_000_000_000),
+		GasFeeCap:       big.NewInt(20_000_000_000),
+		Gas:             100000,
+		WorkflowId:      workflowID,
+		StepId:          2,
+		InvokeRef:       invoke.Hash(),
+		ResponsePayload: common.FromHex("0xcafebabe"),
+		Status:          0,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, validateAGNT2TypedOpOrder([]*types.Transaction{invoke, respond}))
+
+	err = validateAGNT2TypedOpOrder([]*types.Transaction{respond, invoke})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid typed-op dependency order")
+}
+
+func TestValidateAGNT2TypedOpOrder_CrossBlockDependencyAllowed(t *testing.T) {
+	tx := newTestTypedTx(t, types.RespondTxType)
+	err := validateAGNT2TypedOpOrder([]*types.Transaction{tx})
 	require.NoError(t, err)
 }

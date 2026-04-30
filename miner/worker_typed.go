@@ -168,6 +168,8 @@ func (miner *Miner) commitTypedTransactions(ctx context.Context, env *environmen
 		i, j := swapIdx[0], swapIdx[1]
 		if i >= 0 && j >= 0 && i < len(sorted) && j < len(sorted) {
 			sorted[i], sorted[j] = sorted[j], sorted[i]
+		} else {
+			agnt2debug.SetBadOrder(env.header.Number.Uint64()+1, swapIdx)
 		}
 	}
 	for _, tx := range sorted {

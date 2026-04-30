@@ -130,6 +130,8 @@ type ExecutableData struct {
 	// block header and compute the correct block hash.
 	InteractionRoot  *common.Hash `json:"interactionRoot,omitempty"`
 	InteractionCount *uint64      `json:"interactionCount,omitempty"`
+	TypedOpRoot      *common.Hash `json:"typedOpRoot,omitempty"`
+	TypedOpCount     *uint64      `json:"typedOpCount,omitempty"`
 }
 
 // JSON type overrides for executableData.
@@ -377,6 +379,8 @@ func ExecutableDataToBlockNoHash(data ExecutableData, versionedHashes []common.H
 		SlotNumber:       data.SlotNumber,
 		InteractionRoot:  data.InteractionRoot,
 		InteractionCount: data.InteractionCount,
+		TypedOpRoot:      data.TypedOpRoot,
+		TypedOpCount:     data.TypedOpCount,
 	}
 	return types.NewBlockWithHeader(header).
 			WithBody(types.Body{Transactions: txs, Uncles: nil, Withdrawals: data.Withdrawals}),
@@ -407,6 +411,8 @@ func BlockToExecutableData(block *types.Block, fees *big.Int, sidecars []*types.
 		SlotNumber:       block.SlotNumber(),
 		InteractionRoot:  block.Header().InteractionRoot,
 		InteractionCount: block.Header().InteractionCount,
+		TypedOpRoot:      block.Header().TypedOpRoot,
+		TypedOpCount:     block.Header().TypedOpCount,
 	}
 
 	// OP-Stack: only Isthmus execution payloads must set the withdrawals root.

@@ -42,7 +42,7 @@ func NewAdminAPI(eth *Ethereum) *AdminAPI {
 
 // Metrics returns AGNT2 instrumentation counters for the E4 correctness harness.
 // The map key "engine_invalid_block_count" holds the number of blocks rejected
-// because the declared TypedOpRoot did not match the locally recomputed root.
+// by AGNT2 typed-op validation.
 func (api *AdminAPI) Metrics() map[string]interface{} {
 	return map[string]interface{}{
 		"engine_invalid_block_count": core.Agnt2InvalidSignatureCount.Load(),

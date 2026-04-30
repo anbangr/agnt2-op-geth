@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"sync/atomic"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -28,10 +29,9 @@ import (
 	"github.com/ethereum/go-ethereum/trie"
 )
 
-// Agnt2InvalidSignatureCount counts blocks rejected because the declared
-// TypedOpRoot did not match the locally recomputed root. A mismatch indicates
-// either a forged/corrupted typed-tx signature or a sequencer bug. Exported
-// for metrics and test assertions; safe for concurrent access.
+// Agnt2InvalidSignatureCount counts blocks rejected by AGNT2 typed-op
+// validation. Exported for metrics and test assertions; safe for concurrent
+// access.
 var Agnt2InvalidSignatureCount atomic.Uint64
 
 // BlockValidator is responsible for validating block headers, uncles and
@@ -184,6 +184,9 @@ func (v *BlockValidator) ValidateState(block *types.Block, statedb *state.StateD
 	if err := validateAGNT2TypedOpFields(header, block.Transactions()); err != nil {
 		return err
 	}
+	if err := validateAGNT2TypedOpOrder(block.Transactions()); err != nil {
+		return err
+	}
 	// In stateless mode, return early because the receipt and state root are not
 	// provided through the witness, rather the cross validator needs to return it.
 	if stateless {
@@ -261,6 +264,36 @@ func validateAGNT2TypedOpFields(header *types.Header, txs []*types.Transaction) 
 	}
 	if gotCount != *header.TypedOpCount {
 		return fmt.Errorf("AGNT2: invalid typed-op count (remote: %d local: %d)", *header.TypedOpCount, gotCount)
+	}
+	return nil
+}
+
+func validateAGNT2TypedOpOrder(txs []*types.Transaction) error {
+	inBlock := make(map[common.Hash]int)
+	for i, tx := range txs {
+		switch tx.Type() {
+		case types.InvokeTxType, types.RespondTxType, types.ComposeTypedTxType:
+			inBlock[tx.Hash()] = i
+		}
+	}
+	if len(inBlock) == 0 {
+		return nil
+	}
+
+	seen := make(map[common.Hash]struct{}, len(inBlock))
+	for i, tx := range txs {
+		if _, ok := inBlock[tx.Hash()]; !ok {
+			continue
+		}
+		for _, dep := range tx.Agnt2Dependencies() {
+			if depIndex, ok := inBlock[dep]; ok {
+				if _, seenDep := seen[dep]; !seenDep {
+					Agnt2InvalidSignatureCount.Add(1)
+					return fmt.Errorf("AGNT2: invalid typed-op dependency order at tx index %d: dependency %s appears later at tx index %d", i, dep, depIndex)
+				}
+			}
+		}
+		seen[tx.Hash()] = struct{}{}
 	}
 	return nil
 }

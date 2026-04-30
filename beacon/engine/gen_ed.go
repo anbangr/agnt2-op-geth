@@ -38,6 +38,8 @@ func (e ExecutableData) MarshalJSON() ([]byte, error) {
 		WithdrawalsRoot  *common.Hash        `json:"withdrawalsRoot,omitempty"`
 		InteractionRoot  *common.Hash        `json:"interactionRoot,omitempty"`
 		InteractionCount *hexutil.Uint64     `json:"interactionCount,omitempty"`
+		TypedOpRoot      *common.Hash        `json:"typedOpRoot,omitempty"`
+		TypedOpCount     *hexutil.Uint64     `json:"typedOpCount,omitempty"`
 	}
 	var enc ExecutableData
 	enc.ParentHash = e.ParentHash
@@ -66,6 +68,8 @@ func (e ExecutableData) MarshalJSON() ([]byte, error) {
 	enc.WithdrawalsRoot = e.WithdrawalsRoot
 	enc.InteractionRoot = e.InteractionRoot
 	enc.InteractionCount = (*hexutil.Uint64)(e.InteractionCount)
+	enc.TypedOpRoot = e.TypedOpRoot
+	enc.TypedOpCount = (*hexutil.Uint64)(e.TypedOpCount)
 	return json.Marshal(&enc)
 }
 
@@ -93,6 +97,8 @@ func (e *ExecutableData) UnmarshalJSON(input []byte) error {
 		WithdrawalsRoot  *common.Hash        `json:"withdrawalsRoot,omitempty"`
 		InteractionRoot  *common.Hash        `json:"interactionRoot,omitempty"`
 		InteractionCount *hexutil.Uint64     `json:"interactionCount,omitempty"`
+		TypedOpRoot      *common.Hash        `json:"typedOpRoot,omitempty"`
+		TypedOpCount     *hexutil.Uint64     `json:"typedOpCount,omitempty"`
 	}
 	var dec ExecutableData
 	if err := json.Unmarshal(input, &dec); err != nil {
@@ -177,6 +183,12 @@ func (e *ExecutableData) UnmarshalJSON(input []byte) error {
 	}
 	if dec.InteractionCount != nil {
 		e.InteractionCount = (*uint64)(dec.InteractionCount)
+	}
+	if dec.TypedOpRoot != nil {
+		e.TypedOpRoot = dec.TypedOpRoot
+	}
+	if dec.TypedOpCount != nil {
+		e.TypedOpCount = (*uint64)(dec.TypedOpCount)
 	}
 	return nil
 }
