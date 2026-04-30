@@ -2,6 +2,7 @@ package miner
 
 import (
 	"context"
+	"sort"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -15,12 +16,9 @@ var agnt2TypedTxDependencies = func(tx *types.Transaction) []common.Hash {
 	return tx.Agnt2Dependencies()
 }
 
-// commitTypedTransactions sorts typed txs topologically and appends them to env.txs.
-// Execution is deferred to the precompile layer; this function enforces ordering at the
-// miner level (E4.3 prototype approach).
+// commitTypedTransactions sorts typed txs topologically and commits them through the
+// normal miner execution path.
 func (miner *Miner) commitTypedTransactions(ctx context.Context, env *environment, txs []*types.Transaction) error {
-	_ = ctx // reserved for future cancellation propagation
-
 	cycleCount := metrics.GetOrRegisterCounter("miner/typedTx/cycle", nil)
 	missingDepCount := metrics.GetOrRegisterCounter("miner/typedTx/missingDep", nil)
 	crossBlockCount := metrics.GetOrRegisterCounter("miner/typedTx/crossBlockResolved", nil)
@@ -30,6 +28,7 @@ func (miner *Miner) commitTypedTransactions(ctx context.Context, env *environmen
 	// Phase 1: reject stale nonces and deduplicate by logical op id, preserving insertion order.
 	batchTxs := make(map[common.Hash]*types.Transaction)
 	var batchOrder []common.Hash
+	bySender := make(map[common.Address][]common.Hash)
 	seenOpIds := make(map[types.Agnt2OperationID]common.Hash)
 
 	for _, tx := range txs {
@@ -52,15 +51,41 @@ func (miner *Miner) commitTypedTransactions(ctx context.Context, env *environmen
 		}
 		batchTxs[h] = tx
 		batchOrder = append(batchOrder, h)
+		if err == nil {
+			bySender[from] = append(bySender[from], h)
+		}
 	}
 
 	// Phase 2: build dependency graph (Kahn's) and identify deferred nodes.
 	adj := make(map[common.Hash][]common.Hash) // dep → slice of dependents
 	inDegree := make(map[common.Hash]int)
 	deferred := make(map[common.Hash]struct{}) // InvokeTx nodes whose dep is not in batch
+	type typedEdge struct {
+		from common.Hash
+		to   common.Hash
+	}
+	edges := make(map[typedEdge]struct{})
+	addEdge := func(from, to common.Hash) {
+		edge := typedEdge{from: from, to: to}
+		if _, exists := edges[edge]; exists {
+			return
+		}
+		edges[edge] = struct{}{}
+		adj[from] = append(adj[from], to)
+		inDegree[to]++
+	}
 
 	for _, h := range batchOrder {
 		inDegree[h] = 0
+	}
+
+	for _, hashes := range bySender {
+		sort.SliceStable(hashes, func(i, j int) bool {
+			return batchTxs[hashes[i]].Nonce() < batchTxs[hashes[j]].Nonce()
+		})
+		for i := 1; i < len(hashes); i++ {
+			addEdge(hashes[i-1], hashes[i])
+		}
 	}
 
 	for _, h := range batchOrder {
@@ -68,8 +93,7 @@ func (miner *Miner) commitTypedTransactions(ctx context.Context, env *environmen
 		for _, dep := range agnt2TypedTxDependencies(tx) {
 			if _, exists := batchTxs[dep]; exists {
 				// Intra-batch dependency: add directed edge dep → h.
-				adj[dep] = append(adj[dep], h)
-				inDegree[h]++
+				addEdge(dep, h)
 			} else {
 				// Dependency not present in this batch.
 				switch tx.Type() {
@@ -82,6 +106,25 @@ func (miner *Miner) commitTypedTransactions(ctx context.Context, env *environmen
 					crossBlockCount.Inc(1)
 				}
 			}
+		}
+	}
+
+	// Any tx that depends on a deferred tx must also be deferred. Otherwise
+	// unresolved dependency chains look like cycles after Kahn's sort.
+	var deferredQueue []common.Hash
+	for h := range deferred {
+		deferredQueue = append(deferredQueue, h)
+	}
+	for len(deferredQueue) > 0 {
+		curr := deferredQueue[0]
+		deferredQueue = deferredQueue[1:]
+		for _, neighbor := range adj[curr] {
+			if _, exists := deferred[neighbor]; exists {
+				continue
+			}
+			deferred[neighbor] = struct{}{}
+			missingDepCount.Inc(1)
+			deferredQueue = append(deferredQueue, neighbor)
 		}
 	}
 
@@ -115,20 +158,24 @@ func (miner *Miner) commitTypedTransactions(ctx context.Context, env *environmen
 	// Phase 4: any node with inDegree > 0 after Kahn's is part of a cycle.
 	// Increment once per participating node.
 	for _, h := range batchOrder {
-		if inDegree[h] > 0 {
+		if _, isDeferred := deferred[h]; !isDeferred && inDegree[h] > 0 {
 			cycleCount.Inc(1)
 		}
 	}
 
-	// Phase 5: apply E4.6 bad-order injection if set for this block, then append.
-	// Actual execution is handled by the precompile in a later phase.
+	// Phase 5: apply E4.6 bad-order injection if set for this block, then execute.
 	if swapIdx, ok := agnt2debug.GetBadOrder(env.header.Number.Uint64()); ok && len(swapIdx) == 2 {
 		i, j := swapIdx[0], swapIdx[1]
 		if i >= 0 && j >= 0 && i < len(sorted) && j < len(sorted) {
 			sorted[i], sorted[j] = sorted[j], sorted[i]
 		}
 	}
-	env.txs = append(env.txs, sorted...)
+	for _, tx := range sorted {
+		env.state.SetTxContext(tx.Hash(), env.tcount)
+		if err := miner.commitTransaction(ctx, env, tx); err != nil {
+			return err
+		}
+	}
 
 	return nil
 }
