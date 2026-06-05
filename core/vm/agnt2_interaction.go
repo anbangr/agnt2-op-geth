@@ -226,14 +226,26 @@ func agnt2ParseLeaves(input []byte) (root [32]byte, events []LeafEvent, errCode 
 // assert the root matches Go-side encoding vectors directly.
 func validateAndBuildMMR(input []byte, stepCount uint64, abiHeaderSize uint64, workflowID []byte) ([32]byte, []LeafEvent, byte) {
 	if stepCount == 0 {
-		// empty MMR
-		m := &agnt2MMR{}
-		return m.getRoot(), nil, 0
+		// empty MMR. Route through the trie wrapper so the empty-root path is
+		// the same code the benchmark exercises; trie.Root() over zero leaves
+		// is byte-identical to agnt2MMR.getRoot() (keccak256("")).
+		return newAgnt2Trie().Root(), nil, 0
 	}
 	expectedWfHash := crypto.Keccak256(workflowID)
 	leavesStart := uint64(5) + abiHeaderSize
 	var prevHash [32]byte
-	mmr := &agnt2MMR{}
+	// WS3: route the per-leaf append through the interaction-trie wrapper. The
+	// wrapper embeds the same agnt2MMR and appends in identical order, so
+	// trie.Root() is BYTE-IDENTICAL to a bare agnt2MMR.getRoot() over this leaf
+	// sequence — the on-chain root and FoldInteractionRoot output are
+	// unchanged (regression-locked by TestAgnt2Trie_RootParity / T5). The
+	// typed interactionKey is recorded alongside (via the O(1) Append hot path,
+	// NOT the proof-building AppendTyped) so the production root path is the
+	// same code the inclusion/update-proof benchmark measures, with no per-leaf
+	// proof cost on the consensus path.
+	trie := newAgnt2Trie()
+	var wfHash32 [32]byte
+	copy(wfHash32[:], expectedWfHash)
 	events := make([]LeafEvent, 0, stepCount)
 	for i := uint64(0); i < stepCount; i++ {
 		leafStart := leavesStart + i*agnt2LeafSize
@@ -246,7 +258,9 @@ func validateAndBuildMMR(input []byte, stepCount uint64, abiHeaderSize uint64, w
 		}
 		var leafHash [32]byte
 		copy(leafHash[:], crypto.Keccak256(leafBytes))
-		mmr.append(leafHash)
+		// Append to the embedded MMR (root source) and record the typed
+		// interactionKey for this (workflow, step) invocation.
+		trie.Append(interactionKey(wfHash32, uint32(i)), leafHash)
 
 		// Phase 6 — collect per-step event for post-success log emission via
 		// the EVM dispatcher (evmAGNT2PostHook). Run() itself does NOT
@@ -269,7 +283,7 @@ func validateAndBuildMMR(input []byte, stepCount uint64, abiHeaderSize uint64, w
 
 		prevHash = leafHash
 	}
-	return mmr.getRoot(), events, 0
+	return trie.Root(), events, 0
 }
 
 func (c *agnt2Interaction) Run(input []byte) ([]byte, error) {
