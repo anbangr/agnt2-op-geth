@@ -57,6 +57,19 @@ type txJSON struct {
 	Mint       *hexutil.Big    `json:"mint,omitempty"`
 	IsSystemTx *bool           `json:"isSystemTx,omitempty"`
 
+	// AGNT2 typed transaction fields (InvokeTx 0x7A / RespondTx 0x7B / ComposeTypedTx 0x7C)
+	WorkflowId        *common.Hash    `json:"workflowId,omitempty"`
+	StepId            *hexutil.Uint64 `json:"stepId,omitempty"`
+	AgentRole         *string         `json:"agentRole,omitempty"`
+	DepInvokeIds      []common.Hash   `json:"depInvokeIds,omitempty"`
+	Payload           *hexutil.Bytes  `json:"payload,omitempty"`
+	InvokeRef         *common.Hash    `json:"invokeRef,omitempty"`
+	ResponsePayload   *hexutil.Bytes  `json:"responsePayload,omitempty"`
+	Status            *hexutil.Uint64 `json:"status,omitempty"`
+	StepCount         *hexutil.Uint64 `json:"stepCount,omitempty"`
+	StepWorkflowRoots []common.Hash   `json:"stepWorkflowRoots,omitempty"`
+	Payouts           []*hexutil.Big  `json:"payouts,omitempty"`
+
 	// Blob transaction sidecar encoding:
 	Blobs       []kzg4844.Blob       `json:"blobs,omitempty"`
 	Commitments []kzg4844.Commitment `json:"commitments,omitempty"`
@@ -205,6 +218,77 @@ func (tx *Transaction) MarshalJSON() ([]byte, error) {
 		enc.IsSystemTx = &itx.IsSystemTransaction
 		enc.Nonce = (*hexutil.Uint64)(&itx.EffectiveNonce)
 		// other fields will show up as null.
+
+	case *InvokeTx:
+		enc.ChainID = (*hexutil.Big)(itx.ChainID)
+		enc.Nonce = (*hexutil.Uint64)(&itx.Nonce)
+		enc.To = tx.To()
+		enc.Gas = (*hexutil.Uint64)(&itx.Gas)
+		enc.MaxFeePerGas = (*hexutil.Big)(itx.GasFeeCap)
+		enc.MaxPriorityFeePerGas = (*hexutil.Big)(itx.GasTipCap)
+		enc.Value = (*hexutil.Big)(new(big.Int))
+		wf := itx.WorkflowId
+		enc.WorkflowId = &wf
+		stepId := hexutil.Uint64(itx.StepId)
+		enc.StepId = &stepId
+		role := itx.AgentRole
+		enc.AgentRole = &role
+		enc.DepInvokeIds = itx.DepInvokeIds
+		if itx.Payload != nil {
+			payload := hexutil.Bytes(itx.Payload)
+			enc.Payload = &payload
+		}
+		enc.V = (*hexutil.Big)(itx.V)
+		enc.R = (*hexutil.Big)(itx.R)
+		enc.S = (*hexutil.Big)(itx.S)
+
+	case *RespondTx:
+		enc.ChainID = (*hexutil.Big)(itx.ChainID)
+		enc.Nonce = (*hexutil.Uint64)(&itx.Nonce)
+		enc.To = tx.To()
+		enc.Gas = (*hexutil.Uint64)(&itx.Gas)
+		enc.MaxFeePerGas = (*hexutil.Big)(itx.GasFeeCap)
+		enc.MaxPriorityFeePerGas = (*hexutil.Big)(itx.GasTipCap)
+		enc.Value = (*hexutil.Big)(new(big.Int))
+		wf := itx.WorkflowId
+		enc.WorkflowId = &wf
+		stepId := hexutil.Uint64(itx.StepId)
+		enc.StepId = &stepId
+		ref := itx.InvokeRef
+		enc.InvokeRef = &ref
+		if itx.ResponsePayload != nil {
+			rp := hexutil.Bytes(itx.ResponsePayload)
+			enc.ResponsePayload = &rp
+		}
+		status := hexutil.Uint64(itx.Status)
+		enc.Status = &status
+		enc.V = (*hexutil.Big)(itx.V)
+		enc.R = (*hexutil.Big)(itx.R)
+		enc.S = (*hexutil.Big)(itx.S)
+
+	case *ComposeTypedTx:
+		enc.ChainID = (*hexutil.Big)(itx.ChainID)
+		enc.Nonce = (*hexutil.Uint64)(&itx.Nonce)
+		enc.To = tx.To()
+		enc.Gas = (*hexutil.Uint64)(&itx.Gas)
+		enc.MaxFeePerGas = (*hexutil.Big)(itx.GasFeeCap)
+		enc.MaxPriorityFeePerGas = (*hexutil.Big)(itx.GasTipCap)
+		enc.Value = (*hexutil.Big)(new(big.Int))
+		wf := itx.WorkflowId
+		enc.WorkflowId = &wf
+		stepCount := hexutil.Uint64(itx.StepCount)
+		enc.StepCount = &stepCount
+		enc.StepWorkflowRoots = itx.StepWorkflowRoots
+		if itx.Payouts != nil {
+			payouts := make([]*hexutil.Big, len(itx.Payouts))
+			for i, p := range itx.Payouts {
+				payouts[i] = (*hexutil.Big)(p)
+			}
+			enc.Payouts = payouts
+		}
+		enc.V = (*hexutil.Big)(itx.V)
+		enc.R = (*hexutil.Big)(itx.R)
+		enc.S = (*hexutil.Big)(itx.S)
 	}
 	return json.Marshal(&enc)
 }
@@ -590,6 +674,148 @@ func (tx *Transaction) UnmarshalJSON(input []byte) error {
 		if dec.Nonce != nil {
 			inner = &depositTxWithNonce{DepositTx: itx, EffectiveNonce: uint64(*dec.Nonce)}
 		}
+
+	case InvokeTxType:
+		var itx InvokeTx
+		inner = &itx
+		if dec.ChainID != nil {
+			itx.ChainID = (*big.Int)(dec.ChainID)
+		}
+		if dec.Nonce == nil {
+			return errors.New("missing required field 'nonce' in transaction")
+		}
+		itx.Nonce = uint64(*dec.Nonce)
+		if dec.MaxPriorityFeePerGas != nil {
+			itx.GasTipCap = (*big.Int)(dec.MaxPriorityFeePerGas)
+		}
+		if dec.MaxFeePerGas != nil {
+			itx.GasFeeCap = (*big.Int)(dec.MaxFeePerGas)
+		}
+		if dec.Gas == nil {
+			return errors.New("missing required field 'gas' in transaction")
+		}
+		itx.Gas = uint64(*dec.Gas)
+		if dec.WorkflowId != nil {
+			itx.WorkflowId = *dec.WorkflowId
+		}
+		if dec.StepId != nil {
+			itx.StepId = uint8(*dec.StepId)
+		}
+		if dec.AgentRole != nil {
+			itx.AgentRole = *dec.AgentRole
+		}
+		if dec.DepInvokeIds != nil {
+			itx.DepInvokeIds = dec.DepInvokeIds
+		} else {
+			itx.DepInvokeIds = []common.Hash{}
+		}
+		if dec.Payload != nil {
+			itx.Payload = *dec.Payload
+		}
+		if dec.V != nil {
+			itx.V = (*big.Int)(dec.V)
+		}
+		if dec.R != nil {
+			itx.R = (*big.Int)(dec.R)
+		}
+		if dec.S != nil {
+			itx.S = (*big.Int)(dec.S)
+		}
+
+	case RespondTxType:
+		var itx RespondTx
+		inner = &itx
+		if dec.ChainID != nil {
+			itx.ChainID = (*big.Int)(dec.ChainID)
+		}
+		if dec.Nonce == nil {
+			return errors.New("missing required field 'nonce' in transaction")
+		}
+		itx.Nonce = uint64(*dec.Nonce)
+		if dec.MaxPriorityFeePerGas != nil {
+			itx.GasTipCap = (*big.Int)(dec.MaxPriorityFeePerGas)
+		}
+		if dec.MaxFeePerGas != nil {
+			itx.GasFeeCap = (*big.Int)(dec.MaxFeePerGas)
+		}
+		if dec.Gas == nil {
+			return errors.New("missing required field 'gas' in transaction")
+		}
+		itx.Gas = uint64(*dec.Gas)
+		if dec.WorkflowId != nil {
+			itx.WorkflowId = *dec.WorkflowId
+		}
+		if dec.StepId != nil {
+			itx.StepId = uint8(*dec.StepId)
+		}
+		if dec.InvokeRef != nil {
+			itx.InvokeRef = *dec.InvokeRef
+		}
+		if dec.ResponsePayload != nil {
+			itx.ResponsePayload = *dec.ResponsePayload
+		}
+		if dec.Status != nil {
+			itx.Status = uint8(*dec.Status)
+		}
+		if dec.V != nil {
+			itx.V = (*big.Int)(dec.V)
+		}
+		if dec.R != nil {
+			itx.R = (*big.Int)(dec.R)
+		}
+		if dec.S != nil {
+			itx.S = (*big.Int)(dec.S)
+		}
+
+	case ComposeTypedTxType:
+		var itx ComposeTypedTx
+		inner = &itx
+		if dec.ChainID != nil {
+			itx.ChainID = (*big.Int)(dec.ChainID)
+		}
+		if dec.Nonce == nil {
+			return errors.New("missing required field 'nonce' in transaction")
+		}
+		itx.Nonce = uint64(*dec.Nonce)
+		if dec.MaxPriorityFeePerGas != nil {
+			itx.GasTipCap = (*big.Int)(dec.MaxPriorityFeePerGas)
+		}
+		if dec.MaxFeePerGas != nil {
+			itx.GasFeeCap = (*big.Int)(dec.MaxFeePerGas)
+		}
+		if dec.Gas == nil {
+			return errors.New("missing required field 'gas' in transaction")
+		}
+		itx.Gas = uint64(*dec.Gas)
+		if dec.WorkflowId != nil {
+			itx.WorkflowId = *dec.WorkflowId
+		}
+		if dec.StepCount != nil {
+			itx.StepCount = uint8(*dec.StepCount)
+		}
+		if dec.StepWorkflowRoots != nil {
+			itx.StepWorkflowRoots = dec.StepWorkflowRoots
+		} else {
+			itx.StepWorkflowRoots = []common.Hash{}
+		}
+		if dec.Payouts != nil {
+			itx.Payouts = make([]*big.Int, len(dec.Payouts))
+			for i, p := range dec.Payouts {
+				itx.Payouts[i] = (*big.Int)(p)
+			}
+		} else {
+			itx.Payouts = []*big.Int{}
+		}
+		if dec.V != nil {
+			itx.V = (*big.Int)(dec.V)
+		}
+		if dec.R != nil {
+			itx.R = (*big.Int)(dec.R)
+		}
+		if dec.S != nil {
+			itx.S = (*big.Int)(dec.S)
+		}
+
 	default:
 		return ErrTxTypeNotSupported
 	}
