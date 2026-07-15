@@ -1116,6 +1116,16 @@ func RPCMarshalHeader(head *types.Header) map[string]interface{} {
 	if head.InteractionCount != nil {
 		result["interactionCount"] = hexutil.Uint64(*head.InteractionCount)
 	}
+	// TypedOpRoot/TypedOpCount are part of the block hash (rlp:"optional"); they MUST
+	// be emitted so that a client fetching the block over JSON-RPC can reconstruct the
+	// header hash. Omitting them made the block JSON lossy: op-node/op-batcher's
+	// block-lineage tracking mis-hashed blocks containing typed ops -> ErrReorg stall.
+	if head.TypedOpRoot != nil {
+		result["typedOpRoot"] = head.TypedOpRoot
+	}
+	if head.TypedOpCount != nil {
+		result["typedOpCount"] = hexutil.Uint64(*head.TypedOpCount)
+	}
 	return result
 }
 
