@@ -123,6 +123,17 @@ type Header struct {
 
 	// TypedOpCount is the number of typed operations in the block.
 	TypedOpCount *uint64 `json:"typedOpCount" rlp:"optional"`
+
+	// TypedReexecRoot is the B2' per-op re-execution MMR root: for each INVOKE
+	// typed op it commits keccak(abi.encode(txHash, stepType, taskId, agent,
+	// stepPayload, committedOutputHash)) so the L1 LayerRootSettlement fraud gate
+	// can prove a committed op's outputHash and slash iff it diverges from the
+	// canonical deriveInvoke re-derivation. Trailing rlp:"optional" (byte-identical
+	// for pre-B2' blocks); Isthmus-gated, recomputed via FoldTypedReexecRoot.
+	TypedReexecRoot *common.Hash `json:"typedReexecRoot" rlp:"optional"`
+
+	// TypedReexecCount is the leaf count corresponding to TypedReexecRoot.
+	TypedReexecCount *uint64 `json:"typedReexecCount" rlp:"optional"`
 }
 
 // field type overrides for gencodec
@@ -140,6 +151,7 @@ type headerMarshaling struct {
 	SlotNumber       *hexutil.Uint64
 	InteractionCount *hexutil.Uint64
 	TypedOpCount     *hexutil.Uint64
+	TypedReexecCount *hexutil.Uint64
 }
 
 // Hash returns the block hash of the header, which is simply the keccak256 hash of its
@@ -392,6 +404,14 @@ func CopyHeader(h *Header) *Header {
 	if h.TypedOpCount != nil {
 		cpy.TypedOpCount = new(uint64)
 		*cpy.TypedOpCount = *h.TypedOpCount
+	}
+	if h.TypedReexecRoot != nil {
+		cpy.TypedReexecRoot = new(common.Hash)
+		*cpy.TypedReexecRoot = *h.TypedReexecRoot
+	}
+	if h.TypedReexecCount != nil {
+		cpy.TypedReexecCount = new(uint64)
+		*cpy.TypedReexecCount = *h.TypedReexecCount
 	}
 	return &cpy
 }

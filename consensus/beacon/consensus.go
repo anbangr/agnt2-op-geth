@@ -493,6 +493,20 @@ func (beacon *Beacon) FinalizeAndAssemble(ctx context.Context, chain consensus.C
 			header.TypedOpRoot = &rootCopy
 			header.TypedOpCount = &countCopy2
 		}
+
+		// B2' Stage 2: populate the typed-op re-execution MMR root + count so the
+		// L1 LayerRootSettlement fraud gate can bind to a consensus-committed value.
+		// Must match the verifier-side fold in block_validator.go; both call
+		// types.FoldTypedReexecRoot with the same signer. Only set when present.
+		reexecRoot, reexecCount := types.FoldTypedReexecRoot(
+			body.Transactions, types.MakeSigner(chain.Config(), header.Number, header.Time),
+		)
+		if reexecCount > 0 {
+			reexecRootCopy := reexecRoot
+			reexecCountCopy := reexecCount
+			header.TypedReexecRoot = &reexecRootCopy
+			header.TypedReexecCount = &reexecCountCopy
+		}
 	}
 
 	// Assemble the final block.
