@@ -23,6 +23,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus"
+	"github.com/ethereum/go-ethereum/core/agnt2store"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/params"
@@ -186,6 +187,7 @@ func (v *BlockValidator) ValidateState(block *types.Block, statedb *state.StateD
 	}
 	if err := validateAGNT2TypedReexecFields(
 		header, block.Transactions(), types.MakeSigner(v.config, block.Number(), block.Time()),
+		agnt2store.Resolver(statedb, block.NumberU64()),
 	); err != nil {
 		return err
 	}
@@ -279,8 +281,8 @@ func validateAGNT2TypedOpFields(header *types.Header, txs []*types.Transaction) 
 // (one nil, one non-nil) is always rejected. Runs on both the full-node and the
 // stateless fault-proof import paths so the L1 fraud gate can trust the committed
 // re-exec root.
-func validateAGNT2TypedReexecFields(header *types.Header, txs []*types.Transaction, signer types.Signer) error {
-	gotRoot, gotCount := types.FoldTypedReexecRoot(txs, signer)
+func validateAGNT2TypedReexecFields(header *types.Header, txs []*types.Transaction, signer types.Signer, resolver types.ReexecParentResolver) error {
+	gotRoot, gotCount := types.FoldTypedReexecRoot(txs, signer, resolver)
 	if header.TypedReexecRoot == nil && header.TypedReexecCount == nil {
 		// A block with foldable INVOKE/RESPOND ops MUST commit the reexec root. A nil
 		// pair with a non-empty fold is a producer omitting the fraud commitment (the

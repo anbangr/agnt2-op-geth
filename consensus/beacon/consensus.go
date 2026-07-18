@@ -29,6 +29,7 @@ import (
 	"github.com/ethereum/go-ethereum/consensus/misc/eip4844"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/tracing"
+	"github.com/ethereum/go-ethereum/core/agnt2store"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/internal/agnt2debug"
@@ -405,6 +406,14 @@ func (beacon *Beacon) Finalize(chain consensus.ChainHeaderReader, header *types.
 		state.AddBalance(w.Address, amount, tracing.BalanceIncreaseWithdrawal)
 	}
 	// No block reward which is issued by consensus layer instead.
+
+	// B2' cross-block re-exec store: evict ring bucket (N%W) + write this block's
+	// INVOKE outputs so a later-block RESPOND resolves its parent INVOKE cross-block
+	// in FoldTypedReexecRoot. Placed in beacon.Finalize (NOT FinalizeAndAssemble) so
+	// it runs on BOTH the producer (FinalizeAndAssemble->Finalize) and the validator
+	// (StateProcessor.Process->Finalize) paths, reaching an identical post-Finalize
+	// state root. Isthmus-gated inside ProcessReexecStore.
+	agnt2store.ProcessReexecStore(state, chain.Config(), header, body.Transactions)
 }
 
 // FinalizeAndAssemble implements consensus.Engine, setting the final state and
@@ -500,6 +509,7 @@ func (beacon *Beacon) FinalizeAndAssemble(ctx context.Context, chain consensus.C
 		// types.FoldTypedReexecRoot with the same signer. Only set when present.
 		reexecRoot, reexecCount := types.FoldTypedReexecRoot(
 			body.Transactions, types.MakeSigner(chain.Config(), header.Number, header.Time),
+			agnt2store.Resolver(state, header.Number.Uint64()),
 		)
 		if reexecCount > 0 {
 			reexecRootCopy := reexecRoot

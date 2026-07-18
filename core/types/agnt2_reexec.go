@@ -114,6 +114,35 @@ func agnt2ReexecLeaf(txHash common.Hash, stepType uint8, taskId common.Hash, age
 	return crypto.Keccak256Hash(packed)
 }
 
+// ReexecParentResolver resolves a RESPOND's parent INVOKE committedOutputHash from
+// a STRICTLY-PRIOR block's committed state (the B2' cross-block ring). Returns
+// (hash, true) on a cross-block hit; (zero, false) when the parent is absent,
+// evicted past the window, or in the CURRENT block (same-block parents are served
+// only by the in-block map). nil => same-block-only fold (pre-cross-block behavior;
+// preserves existing golden vectors + tests).
+type ReexecParentResolver func(invokeRef common.Hash) (common.Hash, bool)
+
+// AGNT2InvokeReexecOutput is the SINGLE SOURCE OF TRUTH for an INVOKE's committed
+// re-exec outputHash: deriveInvoke(taskId=WorkflowId, agent=signer, callData=Payload,
+// responseBytes=empty). ok is false for a non-INVOKE or an unrecoverable signer.
+// Used by BOTH the fold INVOKE branch AND the cross-block store write hook, so the
+// value written to state is byte-identical to the same-block map value — any skew
+// between the two would diverge the fold (chain split).
+func AGNT2InvokeReexecOutput(tx *Transaction, signer Signer) (common.Hash, bool) {
+	if tx == nil || tx.Type() != InvokeTxType {
+		return common.Hash{}, false
+	}
+	opId, ok := tx.Agnt2OperationID()
+	if !ok {
+		return common.Hash{}, false
+	}
+	agent, err := Sender(signer, tx)
+	if err != nil {
+		return common.Hash{}, false
+	}
+	return agnt2DeriveInvokeOutputHash(opId.WorkflowId, agent, tx.Data(), []byte{}), true
+}
+
 // FoldTypedReexecRoot computes the per-op re-exec MMR root + leaf count over the
 // block's INVOKE + RESPOND typed ops, in block order (matching FoldTypedOpRoot).
 // INVOKE binds (taskId, agent, callData); RESPOND additionally binds the parent
@@ -127,7 +156,7 @@ func agnt2ReexecLeaf(txHash common.Hash, stepType uint8, taskId common.Hash, age
 // self-consistent-but-false commitment. Producer + validator skip identically (the
 // decision is deterministic from block contents), so they agree; cross-block
 // RESPOND coverage is a documented deferral.
-func FoldTypedReexecRoot(txs []*Transaction, signer Signer) (common.Hash, uint64) {
+func FoldTypedReexecRoot(txs []*Transaction, signer Signer, resolveParent ReexecParentResolver) (common.Hash, uint64) {
 	var leaves [][32]byte
 	opOutput := make(map[common.Hash]common.Hash) // in-block op tx-hash -> committed outputHash
 	for _, tx := range txs {
@@ -167,8 +196,16 @@ func FoldTypedReexecRoot(txs []*Transaction, signer Signer) (common.Hash, uint64
 				continue
 			}
 			parentOut, present := opOutput[deps[0]]
+			if !present && resolveParent != nil {
+				// Cross-block: resolve the parent INVOKE's committed output from a
+				// STRICTLY-PRIOR block via the state ring. The resolver's strictly-prior
+				// guard ensures a same-block parent is NEVER served here (only by the map
+				// above), and returns the exact stored value (= the same-block map value).
+				parentOut, present = resolveParent(deps[0])
+			}
 			if !present {
-				// M6: cross-block / missing parent — skip, do not fold parentOut=0.
+				// M6: same-block miss AND (nil resolver OR cross-block miss / evicted past
+				// the window). Skip — do NOT fold parentOut=0 (self-consistent-but-false).
 				continue
 			}
 			callData := []byte{}       // RESPOND: no callData in the typed-VM model
