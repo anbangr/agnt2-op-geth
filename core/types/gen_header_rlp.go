@@ -48,7 +48,9 @@ func (obj *Header) EncodeRLP(_w io.Writer) error {
 	_tmp9 := obj.InteractionCount != nil
 	_tmp10 := obj.TypedOpRoot != nil
 	_tmp11 := obj.TypedOpCount != nil
-	if _tmp1 || _tmp2 || _tmp3 || _tmp4 || _tmp5 || _tmp6 || _tmp7 || _tmp8 || _tmp9 || _tmp10 || _tmp11 {
+	_tmp12 := obj.TypedReexecRoot != nil
+	_tmp13 := obj.TypedReexecCount != nil
+	if _tmp1 || _tmp2 || _tmp3 || _tmp4 || _tmp5 || _tmp6 || _tmp7 || _tmp8 || _tmp9 || _tmp10 || _tmp11 || _tmp12 || _tmp13 {
 		if obj.BaseFee == nil {
 			w.Write(rlp.EmptyString)
 		} else {
@@ -58,74 +60,88 @@ func (obj *Header) EncodeRLP(_w io.Writer) error {
 			w.WriteBigInt(obj.BaseFee)
 		}
 	}
-	if _tmp2 || _tmp3 || _tmp4 || _tmp5 || _tmp6 || _tmp7 || _tmp8 || _tmp9 || _tmp10 || _tmp11 {
+	if _tmp2 || _tmp3 || _tmp4 || _tmp5 || _tmp6 || _tmp7 || _tmp8 || _tmp9 || _tmp10 || _tmp11 || _tmp12 || _tmp13 {
 		if obj.WithdrawalsHash == nil {
 			w.Write([]byte{0x80})
 		} else {
 			w.WriteBytes(obj.WithdrawalsHash[:])
 		}
 	}
-	if _tmp3 || _tmp4 || _tmp5 || _tmp6 || _tmp7 || _tmp8 || _tmp9 || _tmp10 || _tmp11 {
+	if _tmp3 || _tmp4 || _tmp5 || _tmp6 || _tmp7 || _tmp8 || _tmp9 || _tmp10 || _tmp11 || _tmp12 || _tmp13 {
 		if obj.BlobGasUsed == nil {
 			w.Write([]byte{0x80})
 		} else {
 			w.WriteUint64((*obj.BlobGasUsed))
 		}
 	}
-	if _tmp4 || _tmp5 || _tmp6 || _tmp7 || _tmp8 || _tmp9 || _tmp10 || _tmp11 {
+	if _tmp4 || _tmp5 || _tmp6 || _tmp7 || _tmp8 || _tmp9 || _tmp10 || _tmp11 || _tmp12 || _tmp13 {
 		if obj.ExcessBlobGas == nil {
 			w.Write([]byte{0x80})
 		} else {
 			w.WriteUint64((*obj.ExcessBlobGas))
 		}
 	}
-	if _tmp5 || _tmp6 || _tmp7 || _tmp8 || _tmp9 || _tmp10 || _tmp11 {
+	if _tmp5 || _tmp6 || _tmp7 || _tmp8 || _tmp9 || _tmp10 || _tmp11 || _tmp12 || _tmp13 {
 		if obj.ParentBeaconRoot == nil {
 			w.Write([]byte{0x80})
 		} else {
 			w.WriteBytes(obj.ParentBeaconRoot[:])
 		}
 	}
-	if _tmp6 || _tmp7 || _tmp8 || _tmp9 || _tmp10 || _tmp11 {
+	if _tmp6 || _tmp7 || _tmp8 || _tmp9 || _tmp10 || _tmp11 || _tmp12 || _tmp13 {
 		if obj.RequestsHash == nil {
 			w.Write([]byte{0x80})
 		} else {
 			w.WriteBytes(obj.RequestsHash[:])
 		}
 	}
-	if _tmp7 || _tmp8 || _tmp9 || _tmp10 || _tmp11 {
+	if _tmp7 || _tmp8 || _tmp9 || _tmp10 || _tmp11 || _tmp12 || _tmp13 {
 		if obj.SlotNumber == nil {
 			w.Write([]byte{0x80})
 		} else {
 			w.WriteUint64((*obj.SlotNumber))
 		}
 	}
-	if _tmp8 || _tmp9 || _tmp10 || _tmp11 {
+	if _tmp8 || _tmp9 || _tmp10 || _tmp11 || _tmp12 || _tmp13 {
 		if obj.InteractionRoot == nil {
 			w.Write([]byte{0x80})
 		} else {
 			w.WriteBytes(obj.InteractionRoot[:])
 		}
 	}
-	if _tmp9 || _tmp10 || _tmp11 {
+	if _tmp9 || _tmp10 || _tmp11 || _tmp12 || _tmp13 {
 		if obj.InteractionCount == nil {
 			w.Write([]byte{0x80})
 		} else {
 			w.WriteUint64((*obj.InteractionCount))
 		}
 	}
-	if _tmp10 || _tmp11 {
+	if _tmp10 || _tmp11 || _tmp12 || _tmp13 {
 		if obj.TypedOpRoot == nil {
 			w.Write([]byte{0x80})
 		} else {
 			w.WriteBytes(obj.TypedOpRoot[:])
 		}
 	}
-	if _tmp11 {
+	if _tmp11 || _tmp12 || _tmp13 {
 		if obj.TypedOpCount == nil {
 			w.Write([]byte{0x80})
 		} else {
 			w.WriteUint64((*obj.TypedOpCount))
+		}
+	}
+	if _tmp12 || _tmp13 {
+		if obj.TypedReexecRoot == nil {
+			w.Write([]byte{0x80})
+		} else {
+			w.WriteBytes(obj.TypedReexecRoot[:])
+		}
+	}
+	if _tmp13 {
+		if obj.TypedReexecCount == nil {
+			w.Write([]byte{0x80})
+		} else {
+			w.WriteUint64((*obj.TypedReexecCount))
 		}
 	}
 	w.ListEnd(_tmp0)

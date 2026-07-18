@@ -184,6 +184,11 @@ func (v *BlockValidator) ValidateState(block *types.Block, statedb *state.StateD
 	if err := validateAGNT2TypedOpFields(header, block.Transactions()); err != nil {
 		return err
 	}
+	if err := validateAGNT2TypedReexecFields(
+		header, block.Transactions(), types.MakeSigner(v.config, block.Number(), block.Time()),
+	); err != nil {
+		return err
+	}
 	if err := validateAGNT2TypedOpOrder(block.Transactions()); err != nil {
 		return err
 	}
@@ -264,6 +269,30 @@ func validateAGNT2TypedOpFields(header *types.Header, txs []*types.Transaction) 
 	}
 	if gotCount != *header.TypedOpCount {
 		return fmt.Errorf("AGNT2: invalid typed-op count (remote: %d local: %d)", *header.TypedOpCount, gotCount)
+	}
+	return nil
+}
+
+// validateAGNT2TypedReexecFields enforces the B2' contract: when a header declares
+// (TypedReexecRoot, TypedReexecCount), both must be present and both must reproduce
+// from the canonical typed-op re-execution fold (FoldTypedReexecRoot). Half-pair
+// (one nil, one non-nil) is always rejected. Runs on both the full-node and the
+// stateless fault-proof import paths so the L1 fraud gate can trust the committed
+// re-exec root.
+func validateAGNT2TypedReexecFields(header *types.Header, txs []*types.Transaction, signer types.Signer) error {
+	if header.TypedReexecRoot == nil && header.TypedReexecCount == nil {
+		return nil
+	}
+	if header.TypedReexecRoot == nil || header.TypedReexecCount == nil {
+		return errors.New("AGNT2: typedReexecRoot and typedReexecCount must both be present or both absent")
+	}
+	gotRoot, gotCount := types.FoldTypedReexecRoot(txs, signer)
+	if gotRoot != *header.TypedReexecRoot {
+		Agnt2InvalidSignatureCount.Add(1)
+		return fmt.Errorf("AGNT2: invalid typed-reexec root (remote: %x local: %x)", *header.TypedReexecRoot, gotRoot)
+	}
+	if gotCount != *header.TypedReexecCount {
+		return fmt.Errorf("AGNT2: invalid typed-reexec count (remote: %d local: %d)", *header.TypedReexecCount, gotCount)
 	}
 	return nil
 }
