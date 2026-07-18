@@ -180,6 +180,108 @@ func TestCommitTypedTransactions_MixedTypedOrder(t *testing.T) {
 	require.Contains(t, positions, composeTx.Hash(), "ComposeTypedTx is independent in E4.3 and must still be admitted")
 }
 
+// TestCommitTypedTransactions_ComposeAfterSameWorkflowSteps verifies the G1 fix:
+// a COMPOSE submitted FIRST is deterministically reordered after every
+// same-workflow INVOKE/RESPOND via the new step -> compose edges.
+func TestCommitTypedTransactions_ComposeAfterSameWorkflowSteps(t *testing.T) {
+	miner, env := setupTypedEnv(t)
+	ctx := context.Background()
+
+	wfId := common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000021")
+	invokeTx := newTestInvokeTx(wfId, 1, []common.Hash{})
+	respondTx := newTestRespondTx(wfId, 2, invokeTx.Hash())
+	composeTx := newTestComposeTypedTx(wfId, 2)
+	fundTypedTxSenders(t, env, invokeTx, respondTx, composeTx)
+
+	// Submit compose FIRST — the builder must still emit it last.
+	err := miner.commitTypedTransactions(ctx, env, []*types.Transaction{composeTx, respondTx, invokeTx})
+	require.NoError(t, err)
+
+	require.Len(t, env.txs, 3)
+	positions := make(map[common.Hash]int)
+	for i, tx := range env.txs {
+		positions[tx.Hash()] = i
+	}
+	require.Less(t, positions[invokeTx.Hash()], positions[composeTx.Hash()], "invoke must precede compose")
+	require.Less(t, positions[respondTx.Hash()], positions[composeTx.Hash()], "respond must precede compose")
+	require.Less(t, positions[invokeTx.Hash()], positions[respondTx.Hash()], "invoke must precede respond")
+	// Symmetry with the validator's accept case is covered by the core test
+	// TestValidateAGNT2TypedOpOrder_ComposeAfterConstituents, which accepts this
+	// exact invoke -> respond -> compose ordering.
+}
+
+// TestCommitTypedTransactions_ComposeCrossWorkflowIndependent verifies per-workflow
+// scoping does not over-constrain: a COMPOSE(W2) is not ordered against W1's steps.
+func TestCommitTypedTransactions_ComposeCrossWorkflowIndependent(t *testing.T) {
+	miner, env := setupTypedEnv(t)
+	ctx := context.Background()
+
+	w1 := common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000022")
+	w2 := common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000023")
+	invokeTx := newTestInvokeTx(w1, 1, []common.Hash{})
+	respondTx := newTestRespondTx(w1, 2, invokeTx.Hash())
+	composeTx := newTestComposeTypedTx(w2, 2)
+	fundTypedTxSenders(t, env, invokeTx, respondTx, composeTx)
+
+	err := miner.commitTypedTransactions(ctx, env, []*types.Transaction{composeTx, respondTx, invokeTx})
+	require.NoError(t, err)
+
+	require.Len(t, env.txs, 3, "all admitted; compose of a different workflow is unconstrained")
+}
+
+// TestCommitTypedTransactions_ComposeNotBlockedByDeferredSameWorkflowStep verifies
+// the AFTER-BFS / skip-deferred placement: a deferred same-workflow step (missing
+// dep) does NOT drag the COMPOSE into deferral — no settlement-liveness DoS.
+func TestCommitTypedTransactions_ComposeNotBlockedByDeferredSameWorkflowStep(t *testing.T) {
+	miner, env := setupTypedEnv(t)
+	ctx := context.Background()
+
+	wfId := common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000024")
+	missingHash := common.HexToHash("0xdead000000000000000000000000000000000000000000000000000000000000")
+	badInvoke := newTestInvokeTx(wfId, 1, []common.Hash{missingHash}) // deferred (missing dep)
+	composeTx := newTestComposeTypedTx(wfId, 1)
+	fundTypedTxSenders(t, env, composeTx)
+
+	missing := metrics.GetOrRegisterCounter("miner/typedTx/missingDep", nil)
+	missing.Clear()
+
+	err := miner.commitTypedTransactions(ctx, env, []*types.Transaction{badInvoke, composeTx})
+	require.NoError(t, err)
+
+	require.Len(t, env.txs, 1, "compose must be admitted despite a deferred same-workflow step")
+	require.Equal(t, composeTx.Hash(), env.txs[0].Hash())
+	require.EqualValues(t, 1, metrics.GetOrRegisterCounter("miner/typedTx/missingDep", nil).Load())
+}
+
+// TestCommitTypedTransactions_StepDependingOnComposeDeferred verifies the cycle-DoS
+// closure (builder side): a griefer INVOKE naming the honest COMPOSE's hash as a
+// dependency is treated as malformed and deferred, so the honest COMPOSE is NOT
+// evicted as a cycle member. Without the type-aware fix, the compose -> step dep
+// edge plus the step -> compose same-workflow edge would form a 2-cycle and Kahn
+// would drop both — a free, permissionless settlement-liveness DoS.
+func TestCommitTypedTransactions_StepDependingOnComposeDeferred(t *testing.T) {
+	miner, env := setupTypedEnv(t)
+	ctx := context.Background()
+
+	wfId := common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000025")
+	composeTx := newTestComposeTypedTx(wfId, 1)
+	griefInvoke := newTestInvokeTx(wfId, 9, []common.Hash{composeTx.Hash()})
+	fundTypedTxSenders(t, env, composeTx)
+
+	malformed := metrics.GetOrRegisterCounter("miner/typedTx/malformedDep", nil)
+	malformed.Clear()
+	cycle := metrics.GetOrRegisterCounter("miner/typedTx/cycle", nil)
+	cycle.Clear()
+
+	err := miner.commitTypedTransactions(ctx, env, []*types.Transaction{composeTx, griefInvoke})
+	require.NoError(t, err)
+
+	require.Len(t, env.txs, 1, "honest compose must survive the griefing attempt")
+	require.Equal(t, composeTx.Hash(), env.txs[0].Hash())
+	require.EqualValues(t, 1, metrics.GetOrRegisterCounter("miner/typedTx/malformedDep", nil).Load())
+	require.EqualValues(t, 0, metrics.GetOrRegisterCounter("miner/typedTx/cycle", nil).Load(), "no cycle: griefer step is deferred, not a cycle member")
+}
+
 // TestCommitTypedTransactions_CycleDetection verifies the graph cycle path. Real
 // tx-hash cycles are cryptographic fixed points, so the dependency hook injects
 // the graph shape while still exercising commitTypedTransactions counters/output.

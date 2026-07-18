@@ -24,6 +24,7 @@ func (miner *Miner) commitTypedTransactions(ctx context.Context, env *environmen
 	crossBlockCount := metrics.GetOrRegisterCounter("miner/typedTx/crossBlockResolved", nil)
 	dupOpIdCount := metrics.GetOrRegisterCounter("miner/typedTx/duplicateOpId", nil)
 	staleNonceCount := metrics.GetOrRegisterCounter("miner/typedTx/staleNonce", nil)
+	malformedDepCount := metrics.GetOrRegisterCounter("miner/typedTx/malformedDep", nil)
 
 	// Phase 1: reject stale nonces and deduplicate by logical op id, preserving insertion order.
 	batchTxs := make(map[common.Hash]*types.Transaction)
@@ -91,7 +92,20 @@ func (miner *Miner) commitTypedTransactions(ctx context.Context, env *environmen
 	for _, h := range batchOrder {
 		tx := batchTxs[h]
 		for _, dep := range agnt2TypedTxDependencies(tx) {
-			if _, exists := batchTxs[dep]; exists {
+			if depTx, exists := batchTxs[dep]; exists {
+				// Intra-batch dependency. A typed-op dependency must reference an
+				// INVOKE; a step naming a RESPOND or COMPOSE as its dependency is
+				// malformed and is deferred (excluded from this block). This keeps
+				// the honest builder from ever emitting a step → COMPOSE dependency
+				// edge which, combined with the G1 same-workflow edge added below,
+				// would form a Kahn cycle and evict the honest COMPOSE — a free,
+				// permissionless settlement-liveness DoS (the griefer's step is a
+				// cycle member, never committed, and pays no gas).
+				if depTx.Type() != types.InvokeTxType {
+					deferred[h] = struct{}{}
+					malformedDepCount.Inc(1)
+					continue
+				}
 				// Intra-batch dependency: add directed edge dep → h.
 				addEdge(dep, h)
 			} else {
@@ -125,6 +139,39 @@ func (miner *Miner) commitTypedTransactions(ctx context.Context, env *environmen
 			deferred[neighbor] = struct{}{}
 			missingDepCount.Inc(1)
 			deferredQueue = append(deferredQueue, neighbor)
+		}
+	}
+
+	// Phase 2c (G1): same-workflow settlement ordering. Every in-batch admitted
+	// INVOKE/RESPOND that shares a COMPOSE's WorkflowId is a constituent of that
+	// workflow's settlement and must be committed before the COMPOSE. Add edge
+	// step → compose so Kahn emits the COMPOSE after all its same-workflow steps.
+	//
+	// Placed AFTER deferred-propagation and skipping deferred steps: a deferred
+	// step is not in the block, so it imposes no ordering requirement and must NOT
+	// be able to drag the COMPOSE out of the block. This keeps the builder's
+	// emitted order in agreement with the validator (which constrains a COMPOSE
+	// only against same-workflow steps that are actually in-block) and prevents a
+	// deferred same-workflow step from stalling settlement.
+	stepsByWorkflow := make(map[common.Hash][]common.Hash)
+	for _, h := range batchOrder {
+		if _, isDeferred := deferred[h]; isDeferred {
+			continue
+		}
+		if opId, ok := batchTxs[h].Agnt2OperationID(); ok { // INVOKE/RESPOND only
+			stepsByWorkflow[opId.WorkflowId] = append(stepsByWorkflow[opId.WorkflowId], h)
+		}
+	}
+	for _, h := range batchOrder {
+		if _, isDeferred := deferred[h]; isDeferred {
+			continue
+		}
+		wfID, ok := batchTxs[h].Agnt2ComposeWorkflowId()
+		if !ok {
+			continue
+		}
+		for _, stepHash := range stepsByWorkflow[wfID] {
+			addEdge(stepHash, h) // constituent step → compose; lifts inDegree[compose] > 0
 		}
 	}
 

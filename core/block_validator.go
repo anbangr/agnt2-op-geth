@@ -270,10 +270,18 @@ func validateAGNT2TypedOpFields(header *types.Header, txs []*types.Transaction) 
 
 func validateAGNT2TypedOpOrder(txs []*types.Transaction) error {
 	inBlock := make(map[common.Hash]int)
+	// workflowSteps maps a WorkflowId to the in-block INVOKE/RESPOND step hashes
+	// carrying it, in block order. It lets us enforce that a COMPOSE settling a
+	// workflow appears after every same-workflow step present in this block (G1).
+	workflowSteps := make(map[common.Hash][]common.Hash)
 	for i, tx := range txs {
 		switch tx.Type() {
 		case types.InvokeTxType, types.RespondTxType, types.ComposeTypedTxType:
 			inBlock[tx.Hash()] = i
+		}
+		// Agnt2OperationID is ok only for INVOKE/RESPOND — the workflow's steps.
+		if opId, ok := tx.Agnt2OperationID(); ok {
+			workflowSteps[opId.WorkflowId] = append(workflowSteps[opId.WorkflowId], tx.Hash())
 		}
 	}
 	if len(inBlock) == 0 {
@@ -285,11 +293,44 @@ func validateAGNT2TypedOpOrder(txs []*types.Transaction) error {
 		if _, ok := inBlock[tx.Hash()]; !ok {
 			continue
 		}
+		// Explicit tx-hash dependencies (INVOKE.DepInvokeIds, RESPOND.InvokeRef).
+		// Each in-block dependency must (a) reference an INVOKE and (b) precede
+		// this tx. Cross-block dependencies are ordered by block sequence and
+		// skipped here (mirrors the historical behavior).
 		for _, dep := range tx.Agnt2Dependencies() {
-			if depIndex, ok := inBlock[dep]; ok {
-				if _, seenDep := seen[dep]; !seenDep {
+			depIndex, ok := inBlock[dep]
+			if !ok {
+				continue
+			}
+			// Type-aware: a typed-op dependency must reference an INVOKE. A step
+			// naming a RESPOND or COMPOSE as its dependency is malformed. Rejecting
+			// it closes the compose-hash-dependency cycle the G1 same-workflow edge
+			// would otherwise permit: a griefer could point their own INVOKE's
+			// DepInvokeIds at the honest COMPOSE's hash, creating a dep edge
+			// (compose -> step) that, combined with the same-workflow edge
+			// (step -> compose), makes the ordering constraints unsatisfiable.
+			if txs[depIndex].Type() != types.InvokeTxType {
+				Agnt2InvalidSignatureCount.Add(1)
+				return fmt.Errorf("AGNT2: invalid typed-op dependency at tx index %d: dependency %s at tx index %d is not an INVOKE", i, dep, depIndex)
+			}
+			if _, seenDep := seen[dep]; !seenDep {
+				Agnt2InvalidSignatureCount.Add(1)
+				return fmt.Errorf("AGNT2: invalid typed-op dependency order at tx index %d: dependency %s appears later at tx index %d", i, dep, depIndex)
+			}
+		}
+		// G1: a COMPOSE(W) must appear after every in-block INVOKE/RESPOND with
+		// WorkflowId==W. A COMPOSE settles exactly one workflow (the precompile
+		// reverts any leaf whose workflow id differs), so same-workflow steps are
+		// its constituents. This is a within-block guarantee: cross-block
+		// constituents are naturally absent from workflowSteps (unconstrained,
+		// mirroring the cross-block dependency skip above), and it assumes the
+		// producer does not reuse one WorkflowId across two distinct in-block
+		// settlements — true under a single honest sequencer.
+		if wfID, ok := tx.Agnt2ComposeWorkflowId(); ok {
+			for _, stepHash := range workflowSteps[wfID] {
+				if _, seenStep := seen[stepHash]; !seenStep {
 					Agnt2InvalidSignatureCount.Add(1)
-					return fmt.Errorf("AGNT2: invalid typed-op dependency order at tx index %d: dependency %s appears later at tx index %d", i, dep, depIndex)
+					return fmt.Errorf("AGNT2: invalid typed-op dependency order at tx index %d: workflow %s constituent %s appears later at tx index %d", i, wfID, stepHash, inBlock[stepHash])
 				}
 			}
 		}

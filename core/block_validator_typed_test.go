@@ -201,3 +201,145 @@ func TestValidateAGNT2TypedOpOrder_CrossBlockDependencyAllowed(t *testing.T) {
 	err := validateAGNT2TypedOpOrder([]*types.Transaction{tx})
 	require.NoError(t, err)
 }
+
+// --- G1: COMPOSE-after-constituents ordering ---------------------------------
+
+// newComposeTxForWorkflow builds a signed COMPOSE settling workflow wfID with
+// stepCount (<=2) constituents. Signer identity is irrelevant to the ordering
+// rule, so a fresh key is generated per call.
+func newComposeTxForWorkflow(t *testing.T, signer types.Signer, wfID common.Hash, stepCount uint8) *types.Transaction {
+	t.Helper()
+	key, err := crypto.GenerateKey()
+	require.NoError(t, err)
+	roots := []common.Hash{
+		common.HexToHash("0x0100000000000000000000000000000000000000000000000000000000000000"),
+		common.HexToHash("0x0200000000000000000000000000000000000000000000000000000000000000"),
+	}[:stepCount]
+	payouts := []*big.Int{big.NewInt(1), big.NewInt(2)}[:stepCount]
+	tx, err := types.SignNewTx(key, signer, &types.ComposeTypedTx{
+		ChainID:           big.NewInt(9001),
+		Nonce:             0,
+		GasTipCap:         big.NewInt(1_000_000_000),
+		GasFeeCap:         big.NewInt(20_000_000_000),
+		Gas:               100000,
+		WorkflowId:        wfID,
+		StepCount:         stepCount,
+		StepWorkflowRoots: roots,
+		Payouts:           payouts,
+	})
+	require.NoError(t, err)
+	return tx
+}
+
+// newInvokeRespondPair builds an INVOKE and a RESPOND (RESPOND.InvokeRef ->
+// INVOKE) both tagged with wfID. Distinct keys so they are distinct senders.
+func newInvokeRespondPair(t *testing.T, signer types.Signer, wfID common.Hash) (*types.Transaction, *types.Transaction) {
+	t.Helper()
+	k1, err := crypto.GenerateKey()
+	require.NoError(t, err)
+	invoke, err := types.SignNewTx(k1, signer, &types.InvokeTx{
+		ChainID: big.NewInt(9001), Nonce: 0, GasTipCap: big.NewInt(1_000_000_000),
+		GasFeeCap: big.NewInt(20_000_000_000), Gas: 100000, WorkflowId: wfID, StepId: 1,
+		AgentRole: "worker-parent", DepInvokeIds: []common.Hash{}, Payload: common.FromHex("0xdeadbeef"),
+	})
+	require.NoError(t, err)
+	k2, err := crypto.GenerateKey()
+	require.NoError(t, err)
+	respond, err := types.SignNewTx(k2, signer, &types.RespondTx{
+		ChainID: big.NewInt(9001), Nonce: 0, GasTipCap: big.NewInt(1_000_000_000),
+		GasFeeCap: big.NewInt(20_000_000_000), Gas: 100000, WorkflowId: wfID, StepId: 2,
+		InvokeRef: invoke.Hash(), ResponsePayload: common.FromHex("0xcafebabe"), Status: 0,
+	})
+	require.NoError(t, err)
+	return invoke, respond
+}
+
+// A COMPOSE placed after all its same-workflow constituents is accepted.
+func TestValidateAGNT2TypedOpOrder_ComposeAfterConstituents(t *testing.T) {
+	signer := types.LatestSignerForChainID(big.NewInt(9001))
+	wfID := common.HexToHash("0x0300")
+	invoke, respond := newInvokeRespondPair(t, signer, wfID)
+	compose := newComposeTxForWorkflow(t, signer, wfID, 2)
+
+	require.NoError(t, validateAGNT2TypedOpOrder([]*types.Transaction{invoke, respond, compose}))
+}
+
+// A COMPOSE placed before a same-workflow constituent is rejected.
+func TestValidateAGNT2TypedOpOrder_ComposeBeforeConstituentRejected(t *testing.T) {
+	signer := types.LatestSignerForChainID(big.NewInt(9001))
+	wfID := common.HexToHash("0x0301")
+	invoke, respond := newInvokeRespondPair(t, signer, wfID)
+	compose := newComposeTxForWorkflow(t, signer, wfID, 2)
+
+	err := validateAGNT2TypedOpOrder([]*types.Transaction{compose, invoke, respond})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid typed-op dependency order")
+}
+
+// The rule is "after ALL same-workflow steps": a COMPOSE with one constituent
+// still ahead of it is rejected even if another precedes it.
+func TestValidateAGNT2TypedOpOrder_ComposeMidBlockRejected(t *testing.T) {
+	signer := types.LatestSignerForChainID(big.NewInt(9001))
+	wfID := common.HexToHash("0x0302")
+	invoke, respond := newInvokeRespondPair(t, signer, wfID)
+	compose := newComposeTxForWorkflow(t, signer, wfID, 2)
+
+	err := validateAGNT2TypedOpOrder([]*types.Transaction{invoke, compose, respond})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid typed-op dependency order")
+}
+
+// A COMPOSE whose constituents landed in earlier blocks (none in this block) is
+// unconstrained — mirrors the cross-block dependency skip.
+func TestValidateAGNT2TypedOpOrder_ComposeCrossBlockConstituentsAllowed(t *testing.T) {
+	signer := types.LatestSignerForChainID(big.NewInt(9001))
+	compose := newComposeTxForWorkflow(t, signer, common.HexToHash("0x0303"), 2)
+	require.NoError(t, validateAGNT2TypedOpOrder([]*types.Transaction{compose}))
+}
+
+// Scoping is per-workflow: a COMPOSE(W2) is not ordered against a different
+// workflow's (W1) steps.
+func TestValidateAGNT2TypedOpOrder_ComposeDifferentWorkflowUnconstrained(t *testing.T) {
+	signer := types.LatestSignerForChainID(big.NewInt(9001))
+	invoke, respond := newInvokeRespondPair(t, signer, common.HexToHash("0x0401"))
+	compose := newComposeTxForWorkflow(t, signer, common.HexToHash("0x0402"), 2)
+
+	require.NoError(t, validateAGNT2TypedOpOrder([]*types.Transaction{compose, invoke, respond}))
+}
+
+// Cycle-DoS closure (validator side): a step whose in-block dependency resolves
+// to a COMPOSE (not an INVOKE) is malformed and rejected — closing the
+// otherwise-unsatisfiable ordering that the same-workflow edge would create.
+func TestValidateAGNT2TypedOpOrder_StepDependsOnComposeRejected(t *testing.T) {
+	signer := types.LatestSignerForChainID(big.NewInt(9001))
+	wfID := common.HexToHash("0x0500")
+	compose := newComposeTxForWorkflow(t, signer, wfID, 1)
+
+	key, err := crypto.GenerateKey()
+	require.NoError(t, err)
+	// A griefer INVOKE that names the honest COMPOSE's hash as a dependency.
+	griefInvoke, err := types.SignNewTx(key, signer, &types.InvokeTx{
+		ChainID: big.NewInt(9001), Nonce: 0, GasTipCap: big.NewInt(1_000_000_000),
+		GasFeeCap: big.NewInt(20_000_000_000), Gas: 100000, WorkflowId: wfID, StepId: 9,
+		AgentRole: "griefer", DepInvokeIds: []common.Hash{compose.Hash()}, Payload: common.FromHex("0xbad0"),
+	})
+	require.NoError(t, err)
+
+	err = validateAGNT2TypedOpOrder([]*types.Transaction{griefInvoke, compose})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "is not an INVOKE")
+}
+
+// The COMPOSE order-violation reject increments Agnt2InvalidSignatureCount
+// exactly once (surfaced via engine_invalid_block_count).
+func TestAgnt2InvalidSignatureCount_ComposeOrder(t *testing.T) {
+	signer := types.LatestSignerForChainID(big.NewInt(9001))
+	wfID := common.HexToHash("0x0600")
+	invoke, _ := newInvokeRespondPair(t, signer, wfID)
+	compose := newComposeTxForWorkflow(t, signer, wfID, 1)
+
+	before := Agnt2InvalidSignatureCount.Load()
+	err := validateAGNT2TypedOpOrder([]*types.Transaction{compose, invoke})
+	require.Error(t, err)
+	require.Equal(t, before+1, Agnt2InvalidSignatureCount.Load())
+}
