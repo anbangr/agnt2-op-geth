@@ -18,6 +18,7 @@ func TestRPCMarshalHeaderAgnt2RoundTrip(t *testing.T) {
 	u := func(x uint64) *uint64 { return &x }
 	ir := common.HexToHash("0x593744410000000000000000000000000000000000000000000000000000dead")
 	tor := common.HexToHash("0xabcdef0000000000000000000000000000000000000000000000000000000042")
+	trr := common.HexToHash("0xb4f1397ea948c51180ecb4c2bcc3dc9ee2b00dc9aa3b73263fb6d4ba6f60a17d")
 	for _, withTypedOp := range []bool{false, true} {
 		h := &types.Header{
 			ParentHash:  common.HexToHash("0x01"),
@@ -39,6 +40,11 @@ func TestRPCMarshalHeaderAgnt2RoundTrip(t *testing.T) {
 		if withTypedOp {
 			h.TypedOpRoot = &tor
 			h.TypedOpCount = u(5)
+			// B2' Stage 2/3: the reexec pair co-occurs with typedOp and must also
+			// survive the RPC JSON round-trip (else the sidecar can't read the
+			// consensus-committed reexec root and the header re-hash drifts).
+			h.TypedReexecRoot = &trr
+			h.TypedReexecCount = u(3)
 		}
 		ref := h.Hash()
 		js, err := json.Marshal(RPCMarshalHeader(h))

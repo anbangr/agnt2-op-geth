@@ -1126,6 +1126,16 @@ func RPCMarshalHeader(head *types.Header) map[string]interface{} {
 	if head.TypedOpCount != nil {
 		result["typedOpCount"] = hexutil.Uint64(*head.TypedOpCount)
 	}
+	// TypedReexecRoot/TypedReexecCount (B2' Stage 2) are likewise part of the block
+	// hash (rlp:"optional") and must be emitted so a JSON-RPC client can reconstruct
+	// the header hash — and so the sidecar can read the consensus-committed re-exec
+	// root to submit a challengeable settlement (B2' Stage 3).
+	if head.TypedReexecRoot != nil {
+		result["typedReexecRoot"] = head.TypedReexecRoot
+	}
+	if head.TypedReexecCount != nil {
+		result["typedReexecCount"] = hexutil.Uint64(*head.TypedReexecCount)
+	}
 	return result
 }
 
