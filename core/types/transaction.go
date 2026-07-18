@@ -310,6 +310,11 @@ func (tx *Transaction) ChainId() *big.Int {
 // Data returns the input data of the transaction.
 func (tx *Transaction) Data() []byte { return tx.inner.data() }
 
+// Inner returns the inner transaction data. Exposed for AGNT2 typed-tx RPC
+// marshalling (internal/ethapi), which needs the concrete typed-tx fields to
+// emit a complete, round-trippable JSON representation.
+func (tx *Transaction) Inner() TxData { return tx.inner }
+
 // AccessList returns the access list of the transaction.
 func (tx *Transaction) AccessList() AccessList { return tx.inner.accessList() }
 

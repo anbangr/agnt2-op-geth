@@ -1116,6 +1116,16 @@ func RPCMarshalHeader(head *types.Header) map[string]interface{} {
 	if head.InteractionCount != nil {
 		result["interactionCount"] = hexutil.Uint64(*head.InteractionCount)
 	}
+	// TypedOpRoot/TypedOpCount are part of the block hash (rlp:"optional"); they MUST
+	// be emitted so that a client fetching the block over JSON-RPC can reconstruct the
+	// header hash. Omitting them made the block JSON lossy: op-node/op-batcher's
+	// block-lineage tracking mis-hashed blocks containing typed ops -> ErrReorg stall.
+	if head.TypedOpRoot != nil {
+		result["typedOpRoot"] = head.TypedOpRoot
+	}
+	if head.TypedOpCount != nil {
+		result["typedOpCount"] = hexutil.Uint64(*head.TypedOpCount)
+	}
 	return result
 }
 
@@ -1187,6 +1197,22 @@ type RPCTransaction struct {
 	IsSystemTx *bool        `json:"isSystemTx,omitempty"`
 	// deposit-tx post-Canyon only
 	DepositReceiptVersion *hexutil.Uint64 `json:"depositReceiptVersion,omitempty"`
+
+	// AGNT2 typed-tx only (InvokeTx 0x7A / RespondTx 0x7B / ComposeTypedTx 0x7C).
+	// These are required for the JSON representation to round-trip: op-node fetches
+	// L2 blocks via eth_getBlockByHash and re-encodes each tx, which fails validation
+	// if the typed fields are dropped.
+	WorkflowId        *common.Hash    `json:"workflowId,omitempty"`
+	StepId            *hexutil.Uint64 `json:"stepId,omitempty"`
+	AgentRole         *string         `json:"agentRole,omitempty"`
+	DepInvokeIds      []common.Hash   `json:"depInvokeIds,omitempty"`
+	Payload           *hexutil.Bytes  `json:"payload,omitempty"`
+	InvokeRef         *common.Hash    `json:"invokeRef,omitempty"`
+	ResponsePayload   *hexutil.Bytes  `json:"responsePayload,omitempty"`
+	Status            *hexutil.Uint64 `json:"status,omitempty"`
+	StepCount         *hexutil.Uint64 `json:"stepCount,omitempty"`
+	StepWorkflowRoots []common.Hash   `json:"stepWorkflowRoots,omitempty"`
+	Payouts           []*hexutil.Big  `json:"payouts,omitempty"`
 }
 
 // newRPCTransaction returns a transaction that will serialize to the RPC
@@ -1298,6 +1324,51 @@ func newRPCTransaction(tx *types.Transaction, blockHash common.Hash, blockNumber
 			result.GasPrice = (*hexutil.Big)(tx.GasFeeCap())
 		}
 		result.AuthorizationList = tx.SetCodeAuthorizations()
+
+	case types.InvokeTxType, types.RespondTxType, types.ComposeTypedTxType:
+		result.ChainID = (*hexutil.Big)(tx.ChainId())
+		result.GasFeeCap = (*hexutil.Big)(tx.GasFeeCap())
+		result.GasTipCap = (*hexutil.Big)(tx.GasTipCap())
+		switch itx := tx.Inner().(type) {
+		case *types.InvokeTx:
+			wf := itx.WorkflowId
+			result.WorkflowId = &wf
+			stepId := hexutil.Uint64(itx.StepId)
+			result.StepId = &stepId
+			role := itx.AgentRole
+			result.AgentRole = &role
+			result.DepInvokeIds = itx.DepInvokeIds
+			if itx.Payload != nil {
+				p := hexutil.Bytes(itx.Payload)
+				result.Payload = &p
+			}
+		case *types.RespondTx:
+			wf := itx.WorkflowId
+			result.WorkflowId = &wf
+			stepId := hexutil.Uint64(itx.StepId)
+			result.StepId = &stepId
+			ref := itx.InvokeRef
+			result.InvokeRef = &ref
+			if itx.ResponsePayload != nil {
+				rp := hexutil.Bytes(itx.ResponsePayload)
+				result.ResponsePayload = &rp
+			}
+			status := hexutil.Uint64(itx.Status)
+			result.Status = &status
+		case *types.ComposeTypedTx:
+			wf := itx.WorkflowId
+			result.WorkflowId = &wf
+			sc := hexutil.Uint64(itx.StepCount)
+			result.StepCount = &sc
+			result.StepWorkflowRoots = itx.StepWorkflowRoots
+			if itx.Payouts != nil {
+				po := make([]*hexutil.Big, len(itx.Payouts))
+				for i, p := range itx.Payouts {
+					po[i] = (*hexutil.Big)(p)
+				}
+				result.Payouts = po
+			}
+		}
 	}
 	return result
 }
