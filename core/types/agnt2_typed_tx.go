@@ -148,3 +148,19 @@ func (tx *Transaction) Agnt2Dependencies() []common.Hash {
 		return nil
 	}
 }
+
+// Agnt2ComposeWorkflowId returns the WorkflowId a ComposeTypedTx settles. ok is
+// true ONLY for *ComposeTypedTx; every other tx type returns (zero, false).
+//
+// This is deliberately a separate accessor from Agnt2OperationID (which returns
+// ok=false for COMPOSE and is load-bearing for the builder's operation-id dedup):
+// it is a pure read-only accessor over an already-signed field and does NOT touch
+// encode/decode/sigHash, so signed COMPOSE txs, golden fixtures, and the TS signer
+// are unaffected. It backs the G1 rule that a COMPOSE(W) must appear after every
+// in-block INVOKE/RESPOND with WorkflowId==W (its constituents).
+func (tx *Transaction) Agnt2ComposeWorkflowId() (common.Hash, bool) {
+	if itx, ok := tx.inner.(*ComposeTypedTx); ok {
+		return itx.WorkflowId, true
+	}
+	return common.Hash{}, false
+}
