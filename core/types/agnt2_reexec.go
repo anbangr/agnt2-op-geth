@@ -22,7 +22,10 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 )
 
-const agnt2StepTypeInvoke uint8 = 1
+const (
+	agnt2StepTypeInvoke  uint8 = 1
+	agnt2StepTypeRespond uint8 = 2
+)
 
 // ABI types for the re-exec encodings. Constructed once; abi.NewType for these
 // primitives never errors.
@@ -43,6 +46,10 @@ var (
 		{Type: agnt2Bytes32Ty}, {Type: agnt2Uint8Ty}, {Type: agnt2Bytes32Ty},
 		{Type: agnt2AddressTy}, {Type: agnt2BytesTy}, {Type: agnt2Bytes32Ty},
 	}
+	// abi.encode(bytes callData, bytes responseBytes, bytes32 parentOut) — RESPOND envelope
+	agnt2RespondEnvelopeArgs = abi.Arguments{{Type: agnt2BytesTy}, {Type: agnt2BytesTy}, {Type: agnt2Bytes32Ty}}
+	// abi.encode(bytes32 taskId, address agent, bytes32 parentInvokeOutputHash, bytes callData)
+	agnt2RespondInputCommitArgs = abi.Arguments{{Type: agnt2Bytes32Ty}, {Type: agnt2AddressTy}, {Type: agnt2Bytes32Ty}, {Type: agnt2BytesTy}}
 )
 
 // agnt2InvokeEnvelope returns abi.encode(callData, responseBytes) — the INVOKE
@@ -71,6 +78,33 @@ func agnt2DeriveInvokeOutputHash(taskId common.Hash, agent common.Address, callD
 	return crypto.Keccak256Hash(oh)
 }
 
+// agnt2RespondEnvelope returns abi.encode(callData, responseBytes, parentOut) —
+// the RESPOND stepPayload envelope (byte-identical to the Solidity RESPOND path).
+func agnt2RespondEnvelope(callData, responseBytes []byte, parentOut common.Hash) []byte {
+	out, err := agnt2RespondEnvelopeArgs.Pack(callData, responseBytes, [32]byte(parentOut))
+	if err != nil {
+		panic(err)
+	}
+	return out
+}
+
+// agnt2DeriveRespondOutputHash mirrors TypedVmReexec.deriveRespond: the parent
+// INVOKE's outputHash is bound into the commitment preimage so a RESPOND cannot be
+// re-pointed at a different (or forged) parent — this is where the fraud gate gets
+// real teeth (INVOKE alone is vacuous).
+func agnt2DeriveRespondOutputHash(taskId common.Hash, agent common.Address, parentOut common.Hash, callData, responseBytes []byte) common.Hash {
+	ic, err := agnt2RespondInputCommitArgs.Pack([32]byte(taskId), agent, [32]byte(parentOut), callData)
+	if err != nil {
+		panic(err)
+	}
+	inputCommitment := crypto.Keccak256Hash(ic)
+	oh, err := agnt2OutputArgs.Pack([32]byte(inputCommitment), responseBytes)
+	if err != nil {
+		panic(err)
+	}
+	return crypto.Keccak256Hash(oh)
+}
+
 // agnt2ReexecLeaf mirrors AGNT2StepVerifier.reexecFraudLeaf.
 func agnt2ReexecLeaf(txHash common.Hash, stepType uint8, taskId common.Hash, agent common.Address, stepPayload []byte, committedOutputHash common.Hash) common.Hash {
 	packed, err := agnt2LeafArgs.Pack([32]byte(txHash), stepType, [32]byte(taskId), agent, stepPayload, [32]byte(committedOutputHash))
@@ -81,13 +115,29 @@ func agnt2ReexecLeaf(txHash common.Hash, stepType uint8, taskId common.Hash, age
 }
 
 // FoldTypedReexecRoot computes the per-op re-exec MMR root + leaf count over the
-// block's INVOKE typed ops, in block order (matching FoldTypedOpRoot's ordering).
-// The committed outputHash is re-derived here, so it equals the canonical value
-// for every honest op. Returns the empty-MMR root + 0 when no INVOKE ops present.
+// block's INVOKE + RESPOND typed ops, in block order (matching FoldTypedOpRoot).
+// INVOKE binds (taskId, agent, callData); RESPOND additionally binds the parent
+// INVOKE's committed outputHash — resolved from RespondTx.InvokeRef within THIS
+// block — so a re-pointed parent is slashable (the first non-vacuous fraud
+// detection; INVOKE alone is vacuous). The committed outputHash is re-derived here,
+// so it equals the canonical value for every honest op. COMPOSE is Stage 5.
+//
+// M6: a RESPOND whose InvokeRef resolves to a PRIOR block's INVOKE (a same-block
+// map miss) is SKIPPED — NOT folded with parentOut=0, which would be a
+// self-consistent-but-false commitment. Producer + validator skip identically (the
+// decision is deterministic from block contents), so they agree; cross-block
+// RESPOND coverage is a documented deferral.
 func FoldTypedReexecRoot(txs []*Transaction, signer Signer) (common.Hash, uint64) {
 	var leaves [][32]byte
+	opOutput := make(map[common.Hash]common.Hash) // in-block op tx-hash -> committed outputHash
 	for _, tx := range txs {
-		if tx.Type() != InvokeTxType {
+		var stepType uint8
+		switch tx.Type() {
+		case InvokeTxType:
+			stepType = agnt2StepTypeInvoke
+		case RespondTxType:
+			stepType = agnt2StepTypeRespond
+		default:
 			continue
 		}
 		opId, ok := tx.Agnt2OperationID()
@@ -96,16 +146,35 @@ func FoldTypedReexecRoot(txs []*Transaction, signer Signer) (common.Hash, uint64
 		}
 		agent, err := Sender(signer, tx)
 		if err != nil {
-			// An INVOKE whose signer cannot be recovered cannot be folded; skip it
-			// (it would also fail admission). Consistent producer/validator behavior.
+			// Unrecoverable signer -> cannot fold (would also fail admission). Skip.
 			continue
 		}
 		taskId := opId.WorkflowId
-		callData := tx.Data()      // InvokeTx.Payload
-		responseBytes := []byte{}  // INVOKE: request-only (Stage 2 convention)
-		committed := agnt2DeriveInvokeOutputHash(taskId, agent, callData, responseBytes)
-		leaf := agnt2ReexecLeaf(tx.Hash(), agnt2StepTypeInvoke, taskId, agent, agnt2InvokeEnvelope(callData, responseBytes), committed)
-		leaves = append(leaves, leaf)
+
+		var stepPayload []byte
+		var committed common.Hash
+		if stepType == agnt2StepTypeInvoke {
+			callData := tx.Data()     // InvokeTx.Payload
+			responseBytes := []byte{} // INVOKE: request-only
+			committed = agnt2DeriveInvokeOutputHash(taskId, agent, callData, responseBytes)
+			stepPayload = agnt2InvokeEnvelope(callData, responseBytes)
+		} else {
+			deps := tx.Agnt2Dependencies() // [InvokeRef]
+			if len(deps) == 0 {
+				continue
+			}
+			parentOut, present := opOutput[deps[0]]
+			if !present {
+				// M6: cross-block / missing parent — skip, do not fold parentOut=0.
+				continue
+			}
+			callData := []byte{}       // RESPOND: no callData in the typed-VM model
+			responseBytes := tx.Data() // RespondTx.ResponsePayload
+			committed = agnt2DeriveRespondOutputHash(taskId, agent, parentOut, callData, responseBytes)
+			stepPayload = agnt2RespondEnvelope(callData, responseBytes, parentOut)
+		}
+		leaves = append(leaves, agnt2ReexecLeaf(tx.Hash(), stepType, taskId, agent, stepPayload, committed))
+		opOutput[tx.Hash()] = committed
 	}
 	return foldMMR(leaves), uint64(len(leaves))
 }
