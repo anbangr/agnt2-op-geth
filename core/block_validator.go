@@ -280,13 +280,21 @@ func validateAGNT2TypedOpFields(header *types.Header, txs []*types.Transaction) 
 // stateless fault-proof import paths so the L1 fraud gate can trust the committed
 // re-exec root.
 func validateAGNT2TypedReexecFields(header *types.Header, txs []*types.Transaction, signer types.Signer) error {
+	gotRoot, gotCount := types.FoldTypedReexecRoot(txs, signer)
 	if header.TypedReexecRoot == nil && header.TypedReexecCount == nil {
+		// A block with foldable INVOKE/RESPOND ops MUST commit the reexec root. A nil
+		// pair with a non-empty fold is a producer omitting the fraud commitment (the
+		// M4 omission escape — now that RESPOND is non-vacuous, omission would let a
+		// fraudulent op escape re-execution). Only a genuinely-empty fold may omit.
+		if gotCount > 0 {
+			Agnt2InvalidSignatureCount.Add(1)
+			return fmt.Errorf("AGNT2: typedReexecRoot/Count absent but %d foldable typed op(s) present", gotCount)
+		}
 		return nil
 	}
 	if header.TypedReexecRoot == nil || header.TypedReexecCount == nil {
 		return errors.New("AGNT2: typedReexecRoot and typedReexecCount must both be present or both absent")
 	}
-	gotRoot, gotCount := types.FoldTypedReexecRoot(txs, signer)
 	if gotRoot != *header.TypedReexecRoot {
 		Agnt2InvalidSignatureCount.Add(1)
 		return fmt.Errorf("AGNT2: invalid typed-reexec root (remote: %x local: %x)", *header.TypedReexecRoot, gotRoot)

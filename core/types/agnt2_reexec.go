@@ -131,6 +131,9 @@ func FoldTypedReexecRoot(txs []*Transaction, signer Signer) (common.Hash, uint64
 	var leaves [][32]byte
 	opOutput := make(map[common.Hash]common.Hash) // in-block op tx-hash -> committed outputHash
 	for _, tx := range txs {
+		if tx == nil {
+			continue // guard, matching FoldTypedOpRoot / FoldInteractionRoot
+		}
 		var stepType uint8
 		switch tx.Type() {
 		case InvokeTxType:
@@ -174,7 +177,14 @@ func FoldTypedReexecRoot(txs []*Transaction, signer Signer) (common.Hash, uint64
 			stepPayload = agnt2RespondEnvelope(callData, responseBytes, parentOut)
 		}
 		leaves = append(leaves, agnt2ReexecLeaf(tx.Hash(), stepType, taskId, agent, stepPayload, committed))
-		opOutput[tx.Hash()] = committed
+		// Only an INVOKE's output can be a RESPOND's parent (InvokeRef must point at
+		// an INVOKE). Store ONLY INVOKE outputs so the fold self-enforces this — a
+		// RESPOND whose InvokeRef points at another RESPOND finds no entry and is
+		// treated as a cross-block/absent parent (M6 skip) rather than folding a
+		// type-confused parent. Does not rely on validateAGNT2TypedOpOrder running.
+		if stepType == agnt2StepTypeInvoke {
+			opOutput[tx.Hash()] = committed
+		}
 	}
 	return foldMMR(leaves), uint64(len(leaves))
 }
