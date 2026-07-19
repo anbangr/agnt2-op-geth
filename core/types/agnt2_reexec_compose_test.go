@@ -173,3 +173,51 @@ func TestFoldTypedReexecRoot_ComposeNotChildNorParent(t *testing.T) {
 		t.Fatalf("RESPOND->COMPOSE ref: count=%d want 2 (invoke + compose; respond skipped)", count2)
 	}
 }
+
+// TestFoldTypedReexecRoot_ComposeChildFromResolver locks the Stage 4/5 seam with
+// an EXACT recompute: a RESPOND whose parent resolves via the resolver (the
+// cross-block path) folds, and its committed output — derived from the RESOLVED
+// parentOut — is the COMPOSE's child. The stub resolver stands in for the state
+// ring (whose behavior is proven in core/agnt2store); what is locked here is the
+// derivation chain resolver -> respondOut -> children -> composeOut, leaf by leaf.
+func TestFoldTypedReexecRoot_ComposeChildFromResolver(t *testing.T) {
+	key := composeFoldTestKey(t)
+	signer := LatestSignerForChainID(big.NewInt(9001))
+	wf := common.HexToHash("0xC7")
+
+	// The parent INVOKE lives in a "prior block": only its hash + output exist here.
+	parentRef := common.HexToHash("0x1111")
+	parentOut := common.HexToHash("0x2222")
+	resolver := func(ref common.Hash) (common.Hash, bool) {
+		if ref == parentRef {
+			return parentOut, true
+		}
+		return common.Hash{}, false
+	}
+
+	respond := mkFoldRespond(t, signer, key, 0, wf, parentRef)
+	compose := mkFoldCompose(t, signer, key, 1, wf)
+	agent, err := Sender(signer, respond)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	root, count := FoldTypedReexecRoot([]*Transaction{respond, compose}, signer, resolver)
+	if count != 2 {
+		t.Fatalf("count=%d want 2 (resolver-resolved respond + compose)", count)
+	}
+
+	respondOut := agnt2DeriveRespondOutputHash(wf, agent, parentOut, []byte{}, respond.Data())
+	respondLeaf := agnt2ReexecLeaf(respond.Hash(), agnt2StepTypeRespond, wf, agent, agnt2RespondEnvelope([]byte{}, respond.Data(), parentOut), respondOut)
+	children := [][32]byte{respondOut}
+	composeOut := agnt2DeriveComposeOutputHash(wf, agent, []byte{}, children, []byte{})
+	composeLeaf := agnt2ReexecLeaf(compose.Hash(), agnt2StepTypeCompose, wf, agent, agnt2ComposeEnvelope([]byte{}, []byte{}, children), composeOut)
+	if want := foldMMR([][32]byte{respondLeaf, composeLeaf}); root != want {
+		t.Fatalf("resolver->respond->compose chain mismatch:\n got %x\nwant %x", root, want)
+	}
+
+	// Without the resolver both skip (respond: unresolved parent; compose: no children).
+	if _, c := FoldTypedReexecRoot([]*Transaction{respond, compose}, signer, nil); c != 0 {
+		t.Fatalf("nil resolver: count=%d want 0", c)
+	}
+}
