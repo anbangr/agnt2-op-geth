@@ -116,6 +116,15 @@ func agnt2EffectiveGasPrice(dst, gasFeeCap, gasTipCap, baseFee *big.Int) *big.In
 // WRITE (its output is SSTOREd in beacon.Finalize for later-block resolution); a
 // RESPOND additionally reserves the ring READ (its resolver SLOADs the parent). Both
 // happen outside EVM metering, so the sender pays here at admission (DoS pricing).
+//
+// FORK-GATING (pre-mainnet TODO): the ring surcharge is currently unconditional while
+// the work it prices (ProcessReexecStore) is Isthmus-gated. This is safe today because
+// the typed-op re-exec feature is unlaunched — no live chain has typed-tx blocks that
+// were validated under the old (2000-only) surcharge. Before any chain with typed-tx
+// history upgrades into this code, the increased surcharge MUST be gated to a fork
+// boundary (at the application sites, state_transition.go / txpool/validation.go, which
+// have the chain rules) so re-validating historical blocks does not change gasUsed and
+// split old vs new nodes.
 func (tx *Transaction) Agnt2IntrinsicGasSurcharge() uint64 {
 	switch itx := tx.inner.(type) {
 	case *InvokeTx:
