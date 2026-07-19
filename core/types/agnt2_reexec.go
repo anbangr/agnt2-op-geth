@@ -25,6 +25,7 @@ import (
 const (
 	agnt2StepTypeInvoke  uint8 = 1
 	agnt2StepTypeRespond uint8 = 2
+	agnt2StepTypeCompose uint8 = 3
 )
 
 // ABI types for the re-exec encodings. Constructed once; abi.NewType for these
@@ -50,6 +51,14 @@ var (
 	agnt2RespondEnvelopeArgs = abi.Arguments{{Type: agnt2BytesTy}, {Type: agnt2BytesTy}, {Type: agnt2Bytes32Ty}}
 	// abi.encode(bytes32 taskId, address agent, bytes32 parentInvokeOutputHash, bytes callData)
 	agnt2RespondInputCommitArgs = abi.Arguments{{Type: agnt2Bytes32Ty}, {Type: agnt2AddressTy}, {Type: agnt2Bytes32Ty}, {Type: agnt2BytesTy}}
+
+	agnt2Bytes32SliceTy, _ = abi.NewType("bytes32[]", "", nil)
+	// abi.encode(bytes callData, bytes responseBytes, bytes32[] childOutputHashes) — COMPOSE
+	// envelope (matches AGNT2StepVerifier.reexecOutputHash's stepType-3 decode).
+	agnt2ComposeEnvelopeArgs = abi.Arguments{{Type: agnt2BytesTy}, {Type: agnt2BytesTy}, {Type: agnt2Bytes32SliceTy}}
+	// abi.encode(bytes32 taskId, address agent, bytes callData, bytes32[] childOutputHashes)
+	// — mirrors TypedVmReexec.deriveCompose's inputCommitment preimage.
+	agnt2ComposeInputCommitArgs = abi.Arguments{{Type: agnt2Bytes32Ty}, {Type: agnt2AddressTy}, {Type: agnt2BytesTy}, {Type: agnt2Bytes32SliceTy}}
 )
 
 // agnt2InvokeEnvelope returns abi.encode(callData, responseBytes) — the INVOKE
@@ -105,6 +114,34 @@ func agnt2DeriveRespondOutputHash(taskId common.Hash, agent common.Address, pare
 	return crypto.Keccak256Hash(oh)
 }
 
+// agnt2ComposeEnvelope returns abi.encode(callData, responseBytes, childOutputHashes)
+// — the COMPOSE stepPayload envelope (byte-identical to the Solidity stepType-3
+// decode in AGNT2StepVerifier.reexecOutputHash).
+func agnt2ComposeEnvelope(callData, responseBytes []byte, childOutputHashes [][32]byte) []byte {
+	out, err := agnt2ComposeEnvelopeArgs.Pack(callData, responseBytes, childOutputHashes)
+	if err != nil {
+		panic(err)
+	}
+	return out
+}
+
+// agnt2DeriveComposeOutputHash mirrors TypedVmReexec.deriveCompose: the ORDERED
+// childOutputHashes tree is bound into the commitment preimage so a COMPOSE cannot
+// be re-pointed at a different (or reordered) child set — the COMPOSE analogue of
+// the RESPOND parent anchor.
+func agnt2DeriveComposeOutputHash(taskId common.Hash, agent common.Address, callData []byte, childOutputHashes [][32]byte, responseBytes []byte) common.Hash {
+	ic, err := agnt2ComposeInputCommitArgs.Pack([32]byte(taskId), agent, callData, childOutputHashes)
+	if err != nil {
+		panic(err)
+	}
+	inputCommitment := crypto.Keccak256Hash(ic)
+	oh, err := agnt2OutputArgs.Pack([32]byte(inputCommitment), responseBytes)
+	if err != nil {
+		panic(err)
+	}
+	return crypto.Keccak256Hash(oh)
+}
+
 // agnt2ReexecLeaf mirrors AGNT2StepVerifier.reexecFraudLeaf.
 func agnt2ReexecLeaf(txHash common.Hash, stepType uint8, taskId common.Hash, agent common.Address, stepPayload []byte, committedOutputHash common.Hash) common.Hash {
 	packed, err := agnt2LeafArgs.Pack([32]byte(txHash), stepType, [32]byte(taskId), agent, stepPayload, [32]byte(committedOutputHash))
@@ -144,12 +181,13 @@ func AGNT2InvokeReexecOutput(tx *Transaction, signer Signer) (common.Hash, bool)
 }
 
 // FoldTypedReexecRoot computes the per-op re-exec MMR root + leaf count over the
-// block's INVOKE + RESPOND typed ops, in block order (matching FoldTypedOpRoot).
-// INVOKE binds (taskId, agent, callData); RESPOND additionally binds the parent
-// INVOKE's committed outputHash — resolved from RespondTx.InvokeRef within THIS
-// block — so a re-pointed parent is slashable (the first non-vacuous fraud
-// detection; INVOKE alone is vacuous). The committed outputHash is re-derived here,
-// so it equals the canonical value for every honest op. COMPOSE is Stage 5.
+// block's INVOKE + RESPOND + COMPOSE typed ops, in block order (matching
+// FoldTypedOpRoot). INVOKE binds (taskId, agent, callData); RESPOND additionally
+// binds the parent INVOKE's committed outputHash — same-block map first, then the
+// cross-block state ring — so a re-pointed parent is slashable; COMPOSE binds the
+// ORDERED childOutputHashes of its block's folded same-workflow steps, so a
+// re-pointed or reordered child set is slashable. The committed outputHash is
+// re-derived here, so it equals the canonical value for every honest op.
 //
 // M6: a RESPOND whose InvokeRef resolves to a PRIOR block's INVOKE (a same-block
 // map miss) is SKIPPED — NOT folded with parentOut=0, which would be a
@@ -159,6 +197,13 @@ func AGNT2InvokeReexecOutput(tx *Transaction, signer Signer) (common.Hash, bool)
 func FoldTypedReexecRoot(txs []*Transaction, signer Signer, resolveParent ReexecParentResolver) (common.Hash, uint64) {
 	var leaves [][32]byte
 	opOutput := make(map[common.Hash]common.Hash) // in-block op tx-hash -> committed outputHash
+	// wfOutputs accumulates, per WorkflowId in block order, the committed outputHash of
+	// every FOLDED INVOKE/RESPOND leaf. A COMPOSE(W) binds wfOutputs[W] as its ordered
+	// childOutputHashes — the G1 order rule guarantees every in-block step of W precedes
+	// the COMPOSE, so the set is complete by the time the COMPOSE is reached. Skipped
+	// steps (M6) contribute nothing; the skip decision is deterministic on both the
+	// producer and validator, so the child set cannot diverge.
+	wfOutputs := make(map[common.Hash][][32]byte)
 	for _, tx := range txs {
 		if tx == nil {
 			continue // guard, matching FoldTypedOpRoot / FoldInteractionRoot
@@ -169,6 +214,33 @@ func FoldTypedReexecRoot(txs []*Transaction, signer Signer, resolveParent Reexec
 			stepType = agnt2StepTypeInvoke
 		case RespondTxType:
 			stepType = agnt2StepTypeRespond
+		case ComposeTypedTxType:
+			// Stage 5: a COMPOSE folds with childOutputHashes = the block-ordered
+			// committed outputs of THIS block's folded same-workflow steps. Same-block
+			// only (constituents in earlier blocks are not resolved — the documented
+			// COMPOSE analogue of the pre-ring RESPOND deferral); a COMPOSE with zero
+			// in-block constituents is SKIPPED, mirroring the Solidity empty-tree rule
+			// (verifyComposeTypedVm's COMPOSE_EMPTY_TREE) — no vacuous empty-child leaf.
+			// COMPOSE outputs are NOT stored in opOutput (a COMPOSE is never a RESPOND
+			// parent) nor appended to wfOutputs (children are steps only).
+			wfId, ok := tx.Agnt2ComposeWorkflowId()
+			if !ok {
+				continue
+			}
+			children := wfOutputs[wfId]
+			if len(children) == 0 {
+				continue
+			}
+			agent, err := Sender(signer, tx)
+			if err != nil {
+				continue
+			}
+			callData := []byte{}      // COMPOSE carries no callData (ComposeTypedTx.data() is nil)
+			responseBytes := []byte{} // request-only, like INVOKE — the teeth are the child binding
+			committed := agnt2DeriveComposeOutputHash(wfId, agent, callData, children, responseBytes)
+			stepPayload := agnt2ComposeEnvelope(callData, responseBytes, children)
+			leaves = append(leaves, agnt2ReexecLeaf(tx.Hash(), agnt2StepTypeCompose, wfId, agent, stepPayload, committed))
+			continue
 		default:
 			continue
 		}
@@ -214,6 +286,10 @@ func FoldTypedReexecRoot(txs []*Transaction, signer Signer, resolveParent Reexec
 			stepPayload = agnt2RespondEnvelope(callData, responseBytes, parentOut)
 		}
 		leaves = append(leaves, agnt2ReexecLeaf(tx.Hash(), stepType, taskId, agent, stepPayload, committed))
+		// Every folded step's output joins its workflow's ordered child list for a
+		// later same-block COMPOSE (INVOKE and RESPOND both — a COMPOSE settles the
+		// whole workflow, not just requests).
+		wfOutputs[taskId] = append(wfOutputs[taskId], [32]byte(committed))
 		// Only an INVOKE's output can be a RESPOND's parent (InvokeRef must point at
 		// an INVOKE). Store ONLY INVOKE outputs so the fold self-enforces this — a
 		// RESPOND whose InvokeRef points at another RESPOND finds no entry and is

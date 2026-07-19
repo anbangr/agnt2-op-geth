@@ -74,3 +74,40 @@ func TestReexecRespondLeaf_GoldenCrossLang(t *testing.T) {
 		t.Fatalf("RESPOND reexecLeaf drift: got=%s want=%s", leaf.Hex(), wantLeaf)
 	}
 }
+
+// TestReexecComposeLeaf_GoldenCrossLang locks the Go COMPOSE encoding byte-identical
+// to Solidity (deriveCompose + reexecFraudLeaf). The children chain to BOTH prior
+// goldens — [INVOKE golden committed, RESPOND golden committed] in block order —
+// exactly the fold's child-sourcing rule. The ordered child binding is where the
+// COMPOSE gate gets teeth (a re-pointed/reordered child set diverges committed).
+func TestReexecComposeLeaf_GoldenCrossLang(t *testing.T) {
+	taskId := crypto.Keccak256Hash([]byte("golden-workflow"))
+	agent := common.HexToAddress("0x00000000000000000000000000000000caFe0001")
+	txHash := crypto.Keccak256Hash([]byte("compose-golden-tx"))
+	children := [][32]byte{
+		common.HexToHash("0x9499c1314d355d7c7625584bcea66d563b413dfadd1ea0cfe31898bba9248ee3"), // INVOKE golden committed
+		common.HexToHash("0xcd4c447aa0fcdb83c12eeba3b99139ad67cf8c8ca7eea30e3bc12ef7a4088138"), // RESPOND golden committed
+	}
+	callData := []byte{}
+	responseBytes := []byte{}
+
+	const (
+		wantCommitted = "0x70e679dd8d054c43a332a6c35ed67ec0cf54772fa619401464015d2603da2c9a"
+		wantLeaf      = "0xe719b58c85d3614ae77382d1abcc831d42df3c0bd3de97934014ed68a7e6e893"
+	)
+
+	committed := agnt2DeriveComposeOutputHash(taskId, agent, callData, children, responseBytes)
+	if committed.Hex() != wantCommitted {
+		t.Fatalf("COMPOSE committedOutputHash drift: got=%s want=%s", committed.Hex(), wantCommitted)
+	}
+	leaf := agnt2ReexecLeaf(txHash, agnt2StepTypeCompose, taskId, agent, agnt2ComposeEnvelope(callData, responseBytes, children), committed)
+	if leaf.Hex() != wantLeaf {
+		t.Fatalf("COMPOSE reexecLeaf drift: got=%s want=%s", leaf.Hex(), wantLeaf)
+	}
+
+	// Reordered children must diverge (the ordered-tree binding).
+	swapped := [][32]byte{children[1], children[0]}
+	if agnt2DeriveComposeOutputHash(taskId, agent, callData, swapped, responseBytes) == committed {
+		t.Fatal("reordered children must diverge committed hash")
+	}
+}
