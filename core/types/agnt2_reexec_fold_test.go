@@ -36,25 +36,25 @@ func TestFoldTypedReexecRoot_RespondParent(t *testing.T) {
 	}
 
 	// Same-block: both fold (invoke before respond so the parent resolves).
-	rootBoth, countBoth := FoldTypedReexecRoot([]*Transaction{invoke, respond}, signer)
+	rootBoth, countBoth := FoldTypedReexecRoot([]*Transaction{invoke, respond}, signer, nil)
 	if countBoth != 2 {
 		t.Fatalf("same-block INVOKE+RESPOND: count=%d want 2", countBoth)
 	}
 
 	// Only the INVOKE folds when the RESPOND is absent.
-	_, countInvoke := FoldTypedReexecRoot([]*Transaction{invoke}, signer)
+	_, countInvoke := FoldTypedReexecRoot([]*Transaction{invoke}, signer, nil)
 	if countInvoke != 1 {
 		t.Fatalf("INVOKE only: count=%d want 1", countInvoke)
 	}
 
 	// M6: a RESPOND whose parent INVOKE is NOT in this block is skipped.
-	_, countCross := FoldTypedReexecRoot([]*Transaction{respond}, signer)
+	_, countCross := FoldTypedReexecRoot([]*Transaction{respond}, signer, nil)
 	if countCross != 0 {
 		t.Fatalf("cross-block RESPOND: count=%d want 0 (skipped, not folded with parentOut=0)", countCross)
 	}
 
 	// Determinism.
-	rootBoth2, _ := FoldTypedReexecRoot([]*Transaction{invoke, respond}, signer)
+	rootBoth2, _ := FoldTypedReexecRoot([]*Transaction{invoke, respond}, signer, nil)
 	if rootBoth != rootBoth2 {
 		t.Fatal("fold not deterministic")
 	}
@@ -88,10 +88,10 @@ func TestFoldTypedReexecRoot_RespondParentMustBeInvoke(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	respond1 := mkR(1, 2, invoke.Hash())    // parent is the INVOKE -> folds
-	respond2 := mkR(2, 3, respond1.Hash())  // parent is a RESPOND -> must be skipped
+	respond1 := mkR(1, 2, invoke.Hash())   // parent is the INVOKE -> folds
+	respond2 := mkR(2, 3, respond1.Hash()) // parent is a RESPOND -> must be skipped
 
-	_, count := FoldTypedReexecRoot([]*Transaction{invoke, respond1, respond2}, signer)
+	_, count := FoldTypedReexecRoot([]*Transaction{invoke, respond1, respond2}, signer, nil)
 	if count != 2 {
 		t.Fatalf("RESPOND pointing at a RESPOND must be skipped: count=%d want 2 (invoke+respond1)", count)
 	}

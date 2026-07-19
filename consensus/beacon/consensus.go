@@ -27,6 +27,7 @@ import (
 	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/consensus/misc/eip1559"
 	"github.com/ethereum/go-ethereum/consensus/misc/eip4844"
+	"github.com/ethereum/go-ethereum/core/agnt2store"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -405,6 +406,14 @@ func (beacon *Beacon) Finalize(chain consensus.ChainHeaderReader, header *types.
 		state.AddBalance(w.Address, amount, tracing.BalanceIncreaseWithdrawal)
 	}
 	// No block reward which is issued by consensus layer instead.
+
+	// B2' cross-block re-exec store: evict ring bucket (N%W) + write this block's
+	// INVOKE outputs so a later-block RESPOND resolves its parent INVOKE cross-block
+	// in FoldTypedReexecRoot. Placed in beacon.Finalize (NOT FinalizeAndAssemble) so
+	// it runs on BOTH the producer (FinalizeAndAssemble->Finalize) and the validator
+	// (StateProcessor.Process->Finalize) paths, reaching an identical post-Finalize
+	// state root. Isthmus-gated inside ProcessReexecStore.
+	agnt2store.ProcessReexecStore(state, chain.Config(), header, body.Transactions)
 }
 
 // FinalizeAndAssemble implements consensus.Engine, setting the final state and
@@ -436,6 +445,29 @@ func (beacon *Beacon) FinalizeAndAssemble(ctx context.Context, chain consensus.C
 	_, _, finalizeSpanEnd := telemetry.StartSpan(ctx, "consensus.beacon.Finalize")
 	beacon.Finalize(chain, header, state, body)
 	finalizeSpanEnd(nil)
+
+	// B2' cross-block WITNESS COMPLETENESS: the typed-op re-execution fold reads the
+	// ring's parent-INVOKE slots (agnt2store.Resolver) from PRIOR blocks' buckets that
+	// THIS block's Finalize/eviction never touches. Those reads MUST run BEFORE
+	// IntermediateRoot(true) — the sole execution-witness collection pass — so the
+	// parent slots' storage-trie nodes are captured in the shipped execution witness.
+	// The validator folds before its own IntermediateRoot (block_validator.go), so this
+	// keeps the producer SYMMETRIC: a witness-backed stateless verifier reads the same
+	// ring and re-derives an identical TypedReexecRoot/Count (otherwise it would
+	// M6-skip an honest cross-block RESPOND and reject an honest block). The fold only
+	// READS state, so header.Root — computed from state just below — is unaffected.
+	if chain.Config().IsOptimismIsthmus(header.Time) {
+		reexecRoot, reexecCount := types.FoldTypedReexecRoot(
+			body.Transactions, types.MakeSigner(chain.Config(), header.Number, header.Time),
+			agnt2store.Resolver(state, header.Number.Uint64()),
+		)
+		if reexecCount > 0 {
+			reexecRootCopy := reexecRoot
+			reexecCountCopy := reexecCount
+			header.TypedReexecRoot = &reexecRootCopy
+			header.TypedReexecCount = &reexecCountCopy
+		}
+	}
 
 	// Assign the final state root to header.
 	_, _, rootSpanEnd := telemetry.StartSpan(ctx, "consensus.beacon.IntermediateRoot")
@@ -493,20 +525,10 @@ func (beacon *Beacon) FinalizeAndAssemble(ctx context.Context, chain consensus.C
 			header.TypedOpRoot = &rootCopy
 			header.TypedOpCount = &countCopy2
 		}
-
-		// B2' Stage 2: populate the typed-op re-execution MMR root + count so the
-		// L1 LayerRootSettlement fraud gate can bind to a consensus-committed value.
-		// Must match the verifier-side fold in block_validator.go; both call
-		// types.FoldTypedReexecRoot with the same signer. Only set when present.
-		reexecRoot, reexecCount := types.FoldTypedReexecRoot(
-			body.Transactions, types.MakeSigner(chain.Config(), header.Number, header.Time),
-		)
-		if reexecCount > 0 {
-			reexecRootCopy := reexecRoot
-			reexecCountCopy := reexecCount
-			header.TypedReexecRoot = &reexecRootCopy
-			header.TypedReexecCount = &reexecCountCopy
-		}
+		// NOTE: the B2' typed-op re-execution fold (header.TypedReexecRoot/Count) is
+		// computed EARLIER, before IntermediateRoot, so its ring reads are captured in
+		// the execution witness (see the witness-completeness note above). It is NOT
+		// recomputed here.
 	}
 
 	// Assemble the final block.

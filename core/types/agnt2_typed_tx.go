@@ -22,13 +22,29 @@ import (
 	"unicode/utf8"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/params"
 	"golang.org/x/text/unicode/norm"
 )
 
 const (
 	Agnt2MaxAgentRoleBytes = 64
 	Agnt2MaxPayloadBytes   = 16 * 1024
+	// Agnt2TypedTxPerStepGas is the base per-typed-op intrinsic-gas reserve for the
+	// in-memory typed-op / re-exec root commitments.
 	Agnt2TypedTxPerStepGas = 2000
+	// Agnt2ReexecRingWriteGas prices the B2' cross-block re-exec ring WRITE that
+	// beacon.Finalize performs for every INVOKE: 3 cold zero->nonzero SSTOREs (slotOut,
+	// slotBlk, slotMem) into the state-committed ring so a later-block RESPOND can
+	// resolve this INVOKE's committedOutputHash. That work runs in Finalize and is NOT
+	// EVM-metered, so this surcharge charges the INVOKE sender for it at admission,
+	// closing the cheap-typed-tx state-spam DoS. The ring is bounded (W buckets, evicted
+	// every W blocks) so state does not grow without bound, but the transient per-INVOKE
+	// I/O must still be priced. Sized at 3 x (SSTORE-set + cold-slot access).
+	Agnt2ReexecRingWriteGas = 3 * (params.SstoreSetGas + params.ColdSloadCostEIP2929)
+	// Agnt2ReexecRingReadGas prices the RESPOND resolver's 2 cold SLOADs (slotBlk +
+	// slotOut) during the cross-block fold — also non-EVM-metered. Charged to every
+	// RESPOND as a conservative upper bound (only a cross-block parent actually reads).
+	Agnt2ReexecRingReadGas = 2 * params.ColdSloadCostEIP2929
 )
 
 var (
@@ -95,12 +111,28 @@ func agnt2EffectiveGasPrice(dst, gasFeeCap, gasTipCap, baseFee *big.Int) *big.In
 	return tip.Add(tip, baseFee)
 }
 
-// Agnt2IntrinsicGasSurcharge returns the typed-op state-write gas reserve.
+// Agnt2IntrinsicGasSurcharge returns the typed-op intrinsic-gas reserve, including
+// the B2' cross-block re-exec ring cost: an INVOKE additionally reserves the ring
+// WRITE (its output is SSTOREd in beacon.Finalize for later-block resolution); a
+// RESPOND additionally reserves the ring READ (its resolver SLOADs the parent). Both
+// happen outside EVM metering, so the sender pays here at admission (DoS pricing).
+//
+// FORK-GATING (pre-mainnet TODO): the ring surcharge is currently unconditional while
+// the work it prices (ProcessReexecStore) is Isthmus-gated. This is safe today because
+// the typed-op re-exec feature is unlaunched — no live chain has typed-tx blocks that
+// were validated under the old (2000-only) surcharge. Before any chain with typed-tx
+// history upgrades into this code, the increased surcharge MUST be gated to a fork
+// boundary (at the application sites, state_transition.go / txpool/validation.go, which
+// have the chain rules) so re-validating historical blocks does not change gasUsed and
+// split old vs new nodes.
 func (tx *Transaction) Agnt2IntrinsicGasSurcharge() uint64 {
 	switch itx := tx.inner.(type) {
-	case *InvokeTx, *RespondTx:
-		return Agnt2TypedTxPerStepGas
+	case *InvokeTx:
+		return Agnt2TypedTxPerStepGas + Agnt2ReexecRingWriteGas
+	case *RespondTx:
+		return Agnt2TypedTxPerStepGas + Agnt2ReexecRingReadGas
 	case *ComposeTypedTx:
+		// COMPOSE does not touch the INVOKE-only ring (Stage 5 scope).
 		return uint64(itx.StepCount) * Agnt2TypedTxPerStepGas
 	default:
 		return 0

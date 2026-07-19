@@ -74,8 +74,8 @@ func TestAgnt2IntrinsicGasSurcharge(t *testing.T) {
 		tx   *Transaction
 		want uint64
 	}{
-		{name: "invoke", tx: NewTx(testInvokeTx()), want: Agnt2TypedTxPerStepGas},
-		{name: "respond", tx: NewTx(testRespondTx()), want: Agnt2TypedTxPerStepGas},
+		{name: "invoke", tx: NewTx(testInvokeTx()), want: Agnt2TypedTxPerStepGas + Agnt2ReexecRingWriteGas},
+		{name: "respond", tx: NewTx(testRespondTx()), want: Agnt2TypedTxPerStepGas + Agnt2ReexecRingReadGas},
 		{name: "compose", tx: NewTx(testComposeTypedTx()), want: 2 * Agnt2TypedTxPerStepGas},
 	}
 	for _, tt := range tests {

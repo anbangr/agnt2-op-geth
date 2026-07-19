@@ -138,14 +138,14 @@ type Header struct {
 
 // field type overrides for gencodec
 type headerMarshaling struct {
-	Difficulty    *hexutil.Big
-	Number        *hexutil.Big
-	GasLimit      hexutil.Uint64
-	GasUsed       hexutil.Uint64
-	Time          hexutil.Uint64
-	Extra         hexutil.Bytes
-	BaseFee       *hexutil.Big
-	Hash          common.Hash `json:"hash"` // adds call to Hash() in MarshalJSON
+	Difficulty       *hexutil.Big
+	Number           *hexutil.Big
+	GasLimit         hexutil.Uint64
+	GasUsed          hexutil.Uint64
+	Time             hexutil.Uint64
+	Extra            hexutil.Bytes
+	BaseFee          *hexutil.Big
+	Hash             common.Hash `json:"hash"` // adds call to Hash() in MarshalJSON
 	BlobGasUsed      *hexutil.Uint64
 	ExcessBlobGas    *hexutil.Uint64
 	SlotNumber       *hexutil.Uint64
