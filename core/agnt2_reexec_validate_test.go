@@ -32,8 +32,12 @@ func TestValidateAGNT2TypedReexecFields(t *testing.T) {
 	good := &types.Header{TypedReexecRoot: &root, TypedReexecCount: &count}
 	require.NoError(t, validateAGNT2TypedReexecFields(good, txs, signer))
 
-	// Absent pair is a clean no-op.
-	require.NoError(t, validateAGNT2TypedReexecFields(&types.Header{}, txs, signer))
+	// Absent pair is a clean no-op ONLY when the block has no foldable ops.
+	require.NoError(t, validateAGNT2TypedReexecFields(&types.Header{}, []*types.Transaction{}, signer))
+
+	// Omission escape closed (M4): an absent pair with foldable ops is rejected —
+	// a producer cannot omit the fraud commitment for a block that has typed ops.
+	require.Error(t, validateAGNT2TypedReexecFields(&types.Header{}, txs, signer))
 
 	// Tampered root is rejected.
 	bad := root

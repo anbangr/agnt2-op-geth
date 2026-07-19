@@ -47,3 +47,30 @@ func TestReexecLeaf_GoldenCrossLang(t *testing.T) {
 		t.Fatalf("reexec root drift: got=%s want=%s", root.Hex(), wantRoot3)
 	}
 }
+
+// TestReexecRespondLeaf_GoldenCrossLang locks the Go RESPOND encoding byte-identical
+// to Solidity (deriveRespond + reexecFraudLeaf). The RESPOND chains to the INVOKE
+// golden: parentOut == the INVOKE golden committedOutputHash. This is where the
+// fraud gate gets real teeth (the parent anchor).
+func TestReexecRespondLeaf_GoldenCrossLang(t *testing.T) {
+	taskId := crypto.Keccak256Hash([]byte("golden-workflow"))
+	agent := common.HexToAddress("0x00000000000000000000000000000000caFe0001")
+	txHash := crypto.Keccak256Hash([]byte("respond-golden-tx"))
+	parentOut := common.HexToHash("0x9499c1314d355d7c7625584bcea66d563b413dfadd1ea0cfe31898bba9248ee3")
+	callData := []byte{}
+	responseBytes := []byte("respond-payload")
+
+	const (
+		wantCommitted = "0xcd4c447aa0fcdb83c12eeba3b99139ad67cf8c8ca7eea30e3bc12ef7a4088138"
+		wantLeaf      = "0x8b659b38fc14f0231ee568a950fa08942dec30c0ea129c3a65c1a3e174dafabf"
+	)
+
+	committed := agnt2DeriveRespondOutputHash(taskId, agent, parentOut, callData, responseBytes)
+	if committed.Hex() != wantCommitted {
+		t.Fatalf("RESPOND committedOutputHash drift: got=%s want=%s", committed.Hex(), wantCommitted)
+	}
+	leaf := agnt2ReexecLeaf(txHash, agnt2StepTypeRespond, taskId, agent, agnt2RespondEnvelope(callData, responseBytes, parentOut), committed)
+	if leaf.Hex() != wantLeaf {
+		t.Fatalf("RESPOND reexecLeaf drift: got=%s want=%s", leaf.Hex(), wantLeaf)
+	}
+}
