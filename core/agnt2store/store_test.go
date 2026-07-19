@@ -187,4 +187,122 @@ func TestFoldResolvesCrossBlockRespond(t *testing.T) {
 	if _, count := types.FoldTypedReexecRoot([]*types.Transaction{respond}, signer, Resolver(sdb, 101)); count != 1 {
 		t.Fatalf("ring resolver: count=%d want 1 (cross-block RESPOND resolves + folds)", count)
 	}
+
+	// Evict the parent (block 100+W reuses its bucket), then fold with the REAL ring
+	// resolver: the evicted parent must make the RESPOND SKIP (count 0) — never fold
+	// with parentOut=0 (a self-consistent-but-false commitment).
+	w := params.AGNT2ReexecWindow
+	ProcessReexecStore(sdb, cfg, mkHeader(100+w), nil)
+	if _, count := types.FoldTypedReexecRoot([]*types.Transaction{respond}, signer, Resolver(sdb, 100+w+1)); count != 0 {
+		t.Fatalf("evicted parent + ring resolver: count=%d want 0 (skip, not parentOut=0)", count)
+	}
+}
+
+// TestMultiEntryEviction exercises the eviction loop with cnt>1: THREE INVOKEs
+// written in one block must ALL be resolvable within the window and ALL evicted
+// (out, blk, mem, cnt cleared) when the bucket is reused W blocks later — an
+// off-by-one in the slotMem reverse-index walk would leave a live straggler.
+func TestMultiEntryEviction(t *testing.T) {
+	cfg := params.OptimismTestConfig
+	w := params.AGNT2ReexecWindow
+	sdb, _ := newTestState(t)
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	h100 := mkHeader(100)
+	signer := types.MakeSigner(cfg, h100.Number, h100.Time)
+	invokes := []*types.Transaction{
+		mkInvoke(t, cfg, signer, key, 0, common.HexToHash("0x01")),
+		mkInvoke(t, cfg, signer, key, 1, common.HexToHash("0x02")),
+		mkInvoke(t, cfg, signer, key, 2, common.HexToHash("0x03")),
+	}
+	ProcessReexecStore(sdb, cfg, h100, invokes)
+
+	// All three resolvable cross-block, each to its own canonical value.
+	for i, inv := range invokes {
+		want, _ := types.AGNT2InvokeReexecOutput(inv, signer)
+		got, p := Resolver(sdb, 101)(inv.Hash())
+		if !p || got != want {
+			t.Fatalf("invoke[%d] not resolvable or wrong value: present=%v", i, p)
+		}
+	}
+	// Bucket bookkeeping: cnt=3 and all three reverse-index slots populated.
+	b := uint64(100) % w
+	if cnt := sdb.GetState(params.AGNT2ReexecStoreAddr, slotCnt(b)).Big().Uint64(); cnt != 3 {
+		t.Fatalf("bucket cnt=%d want 3", cnt)
+	}
+
+	// Block 100+W evicts ALL of them.
+	ProcessReexecStore(sdb, cfg, mkHeader(100+w), nil)
+	for i, inv := range invokes {
+		if _, p := Resolver(sdb, 100+w+1)(inv.Hash()); p {
+			t.Fatalf("invoke[%d] survived eviction (off-by-one in the slotMem walk?)", i)
+		}
+	}
+	// Every ring slot must be zeroed — no storage stragglers (bounded-state invariant).
+	addr := params.AGNT2ReexecStoreAddr
+	if cnt := sdb.GetState(addr, slotCnt(b)); cnt != (common.Hash{}) {
+		t.Fatalf("bucket cnt not cleared: %x", cnt)
+	}
+	for j := uint64(0); j < 3; j++ {
+		if v := sdb.GetState(addr, slotMem(b, j)); v != (common.Hash{}) {
+			t.Fatalf("slotMem[%d][%d] not cleared: %x", b, j, v)
+		}
+	}
+	for i, inv := range invokes {
+		if v := sdb.GetState(addr, slotOut(inv.Hash())); v != (common.Hash{}) {
+			t.Fatalf("slotOut[invoke[%d]] not cleared: %x", i, v)
+		}
+		if v := sdb.GetState(addr, slotBlk(inv.Hash())); v != (common.Hash{}) {
+			t.Fatalf("slotBlk[invoke[%d]] not cleared: %x", i, v)
+		}
+	}
+}
+
+// TestEvictToEmptySurvivesCommit commits the state AFTER eviction has emptied the
+// account's storage (deleteEmptyObjects=true) and reopens: the Nonce=1 seed must
+// keep the reserved account alive so later blocks can keep writing the ring. If the
+// account were pruned, its next write would resurrect it with a different account
+// shape on producer vs an importer that never pruned — a state-root divergence.
+func TestEvictToEmptySurvivesCommit(t *testing.T) {
+	cfg := params.OptimismTestConfig
+	w := params.AGNT2ReexecWindow
+	sdb, db := newTestState(t)
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	h100 := mkHeader(100)
+	signer := types.MakeSigner(cfg, h100.Number, h100.Time)
+	inv := mkInvoke(t, cfg, signer, key, 0, common.HexToHash("0x77"))
+	ProcessReexecStore(sdb, cfg, h100, []*types.Transaction{inv})
+
+	// Evict to empty storage, then commit with empty-object deletion ON.
+	ProcessReexecStore(sdb, cfg, mkHeader(100+w), nil)
+	root, err := sdb.Commit(100+w, true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := state.New(root, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reopened.Exist(params.AGNT2ReexecStoreAddr) {
+		t.Fatal("reserved account pruned after evict-to-empty commit (Nonce=1 seed failed)")
+	}
+	if n := reopened.GetNonce(params.AGNT2ReexecStoreAddr); n != 1 {
+		t.Fatalf("reopened nonce=%d want 1", n)
+	}
+
+	// The ring must keep working from the reopened state: a fresh INVOKE written in a
+	// later block resolves as before (the account was not resurrected with odd shape).
+	inv2 := mkInvoke(t, cfg, signer, key, 1, common.HexToHash("0x88"))
+	h2 := mkHeader(100 + w + 1)
+	ProcessReexecStore(reopened, cfg, h2, []*types.Transaction{inv2})
+	want, _ := types.AGNT2InvokeReexecOutput(inv2, types.MakeSigner(cfg, h2.Number, h2.Time))
+	got, p := Resolver(reopened, 100+w+2)(inv2.Hash())
+	if !p || got != want {
+		t.Fatalf("ring broken after evict-to-empty commit round-trip: present=%v", p)
+	}
 }

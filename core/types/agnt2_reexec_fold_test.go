@@ -88,8 +88,8 @@ func TestFoldTypedReexecRoot_RespondParentMustBeInvoke(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	respond1 := mkR(1, 2, invoke.Hash())    // parent is the INVOKE -> folds
-	respond2 := mkR(2, 3, respond1.Hash())  // parent is a RESPOND -> must be skipped
+	respond1 := mkR(1, 2, invoke.Hash())   // parent is the INVOKE -> folds
+	respond2 := mkR(2, 3, respond1.Hash()) // parent is a RESPOND -> must be skipped
 
 	_, count := FoldTypedReexecRoot([]*Transaction{invoke, respond1, respond2}, signer, nil)
 	if count != 2 {

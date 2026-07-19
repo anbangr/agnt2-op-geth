@@ -35,10 +35,10 @@ import (
 // Domain-separated storage-slot namespaces (single-byte prefixes prevent collision).
 func u256(x uint64) []byte { return common.BigToHash(new(big.Int).SetUint64(x)).Bytes() }
 
-func slotOut(txHash common.Hash) common.Hash { return crypto.Keccak256Hash([]byte{0x01}, txHash[:]) } // -> committedOutputHash
-func slotCnt(b uint64) common.Hash           { return crypto.Keccak256Hash([]byte{0x02}, u256(b)) }    // -> live entry count of bucket b
+func slotOut(txHash common.Hash) common.Hash { return crypto.Keccak256Hash([]byte{0x01}, txHash[:]) }        // -> committedOutputHash
+func slotCnt(b uint64) common.Hash           { return crypto.Keccak256Hash([]byte{0x02}, u256(b)) }          // -> live entry count of bucket b
 func slotMem(b, j uint64) common.Hash        { return crypto.Keccak256Hash([]byte{0x03}, u256(b), u256(j)) } // -> j-th txHash in bucket b (eviction reverse-index)
-func slotBlk(txHash common.Hash) common.Hash { return crypto.Keccak256Hash([]byte{0x04}, txHash[:]) } // -> block number written (strictly-prior guard)
+func slotBlk(txHash common.Hash) common.Hash { return crypto.Keccak256Hash([]byte{0x04}, txHash[:]) }        // -> block number written (strictly-prior guard)
 
 // ProcessReexecStore evicts ring bucket (header.Number % W) and writes this block's
 // INVOKE outputs. Called ONLY from beacon.Finalize (symmetric across producer,
