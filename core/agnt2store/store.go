@@ -45,6 +45,14 @@ func slotBlk(txHash common.Hash) common.Hash { return crypto.Keccak256Hash([]byt
 // validator, reorg re-exec, and the stateless verifier), gated on Optimism Isthmus.
 // Eviction is UNCONDITIONAL (keeps the W-block horizon crisp); the write is skipped
 // when the block has no INVOKEs.
+//
+// WITNESS NOTE: these raw StateDB writes/reads run in Finalize, OUTSIDE the EVM, so
+// on MPT they are witnessed via the trie preimage/node collection at IntermediateRoot
+// PROVIDED the reads happen before it — the producer fold is ordered accordingly (see
+// consensus.go). When Verkle/EIP-4762 activates, StateDB.AccessEvents (nil on MPT) will
+// NOT auto-capture these Finalize-time accesses; this reserved account + its touched
+// slots must then be registered explicitly (mirroring the withdrawals-root AddAccount
+// in FinalizeAndAssemble) or a Verkle stateless witness would be incomplete.
 func ProcessReexecStore(state vm.StateDB, cfg *params.ChainConfig, header *types.Header, txs []*types.Transaction) {
 	if cfg == nil || !cfg.IsOptimismIsthmus(header.Time) {
 		return
