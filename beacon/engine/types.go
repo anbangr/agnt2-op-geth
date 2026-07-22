@@ -132,6 +132,12 @@ type ExecutableData struct {
 	InteractionCount *uint64      `json:"interactionCount,omitempty"`
 	TypedOpRoot      *common.Hash `json:"typedOpRoot,omitempty"`
 	TypedOpCount     *uint64      `json:"typedOpCount,omitempty"`
+	// B2' per-op re-exec MMR root + leaf count. Like the fields above, these are
+	// hashed header fields (rlp:"optional"), so they MUST travel in the payload or
+	// ExecutableDataToBlock reconstructs a header with a different block hash and
+	// NewPayload rejects every typed-op block with "blockhash mismatch".
+	TypedReexecRoot  *common.Hash `json:"typedReexecRoot,omitempty"`
+	TypedReexecCount *uint64      `json:"typedReexecCount,omitempty"`
 }
 
 // JSON type overrides for executableData.
@@ -381,6 +387,8 @@ func ExecutableDataToBlockNoHash(data ExecutableData, versionedHashes []common.H
 		InteractionCount: data.InteractionCount,
 		TypedOpRoot:      data.TypedOpRoot,
 		TypedOpCount:     data.TypedOpCount,
+		TypedReexecRoot:  data.TypedReexecRoot,
+		TypedReexecCount: data.TypedReexecCount,
 	}
 	return types.NewBlockWithHeader(header).
 			WithBody(types.Body{Transactions: txs, Uncles: nil, Withdrawals: data.Withdrawals}),
@@ -413,6 +421,8 @@ func BlockToExecutableData(block *types.Block, fees *big.Int, sidecars []*types.
 		InteractionCount: block.Header().InteractionCount,
 		TypedOpRoot:      block.Header().TypedOpRoot,
 		TypedOpCount:     block.Header().TypedOpCount,
+		TypedReexecRoot:  block.Header().TypedReexecRoot,
+		TypedReexecCount: block.Header().TypedReexecCount,
 	}
 
 	// OP-Stack: only Isthmus execution payloads must set the withdrawals root.

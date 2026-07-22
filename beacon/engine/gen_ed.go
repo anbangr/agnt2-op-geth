@@ -40,6 +40,8 @@ func (e ExecutableData) MarshalJSON() ([]byte, error) {
 		InteractionCount *hexutil.Uint64     `json:"interactionCount,omitempty"`
 		TypedOpRoot      *common.Hash        `json:"typedOpRoot,omitempty"`
 		TypedOpCount     *hexutil.Uint64     `json:"typedOpCount,omitempty"`
+		TypedReexecRoot  *common.Hash        `json:"typedReexecRoot,omitempty"`
+		TypedReexecCount *hexutil.Uint64     `json:"typedReexecCount,omitempty"`
 	}
 	var enc ExecutableData
 	enc.ParentHash = e.ParentHash
@@ -70,6 +72,8 @@ func (e ExecutableData) MarshalJSON() ([]byte, error) {
 	enc.InteractionCount = (*hexutil.Uint64)(e.InteractionCount)
 	enc.TypedOpRoot = e.TypedOpRoot
 	enc.TypedOpCount = (*hexutil.Uint64)(e.TypedOpCount)
+	enc.TypedReexecRoot = e.TypedReexecRoot
+	enc.TypedReexecCount = (*hexutil.Uint64)(e.TypedReexecCount)
 	return json.Marshal(&enc)
 }
 
@@ -99,6 +103,8 @@ func (e *ExecutableData) UnmarshalJSON(input []byte) error {
 		InteractionCount *hexutil.Uint64     `json:"interactionCount,omitempty"`
 		TypedOpRoot      *common.Hash        `json:"typedOpRoot,omitempty"`
 		TypedOpCount     *hexutil.Uint64     `json:"typedOpCount,omitempty"`
+		TypedReexecRoot  *common.Hash        `json:"typedReexecRoot,omitempty"`
+		TypedReexecCount *hexutil.Uint64     `json:"typedReexecCount,omitempty"`
 	}
 	var dec ExecutableData
 	if err := json.Unmarshal(input, &dec); err != nil {
@@ -189,6 +195,12 @@ func (e *ExecutableData) UnmarshalJSON(input []byte) error {
 	}
 	if dec.TypedOpCount != nil {
 		e.TypedOpCount = (*uint64)(dec.TypedOpCount)
+	}
+	if dec.TypedReexecRoot != nil {
+		e.TypedReexecRoot = dec.TypedReexecRoot
+	}
+	if dec.TypedReexecCount != nil {
+		e.TypedReexecCount = (*uint64)(dec.TypedReexecCount)
 	}
 	return nil
 }
