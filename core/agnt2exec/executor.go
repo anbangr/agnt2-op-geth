@@ -35,6 +35,8 @@
 package agnt2exec
 
 import (
+	"encoding/binary"
+
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/agnt2store"
 	"github.com/ethereum/go-ethereum/core/tracing"
@@ -306,9 +308,23 @@ func incHash(cur common.Hash) common.Hash {
 	return v.Bytes32()
 }
 
-// composeAgent derives a deterministic synthetic agent address for the i-th settled
-// step of workflow wf, so fan-in n produces n distinct balance/reputation writes.
+// AgentPoolSize is the modeled AGENT POPULATION — the number of distinct agent
+// addresses that participate across all workflows. composeAgent maps each settled step
+// into this pool, so a SMALLER pool means more cross-workflow agents are shared, which
+// the scheduler surfaces as bal:/rep: conflicts that serialize otherwise-independent
+// settlements. Default is effectively unbounded (near-unique agents); the parallel
+// scheduler measurement sweeps it to show how realized parallelism degrades as the
+// agent population concentrates. It is a shared modeling knob: composeAgent (executor)
+// and DeclareRW (scheduler) both read it, so the conflict model stays sound.
+var AgentPoolSize uint64 = 1 << 40
+
+// composeAgent derives the deterministic agent address settling the i-th step of
+// workflow wf, drawn from a pool of AgentPoolSize distinct agents.
 func composeAgent(wf common.Hash, i int) common.Address {
 	h := crypto.Keccak256Hash([]byte{0x20}, wf[:], []byte{byte(i), byte(i >> 8)})
-	return common.BytesToAddress(h[12:])
+	idx := binary.BigEndian.Uint64(h[:8]) % AgentPoolSize
+	var b [8]byte
+	binary.BigEndian.PutUint64(b[:], idx)
+	ah := crypto.Keccak256Hash([]byte{0x21}, b[:])
+	return common.BytesToAddress(ah[12:])
 }
