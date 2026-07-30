@@ -196,3 +196,13 @@ func (tx *Transaction) Agnt2ComposeWorkflowId() (common.Hash, bool) {
 	}
 	return common.Hash{}, false
 }
+
+// Agnt2ComposeStepCount returns the declared step count (fan-in) of a COMPOSE typed
+// tx, and false for any other tx type. Exposed for the native typed-VM executor,
+// whose COMPOSE settlement cost scales with the number of aggregated steps.
+func (tx *Transaction) Agnt2ComposeStepCount() (uint8, bool) {
+	if itx, ok := tx.inner.(*ComposeTypedTx); ok {
+		return itx.StepCount, true
+	}
+	return 0, false
+}
