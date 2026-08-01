@@ -167,3 +167,27 @@ func keySet(ks []Key) map[Key]bool {
 	}
 	return m
 }
+
+// FalseConflictEdges counts ordered pairs (j<i) that conflict under the CONSERVATIVE
+// (Block-STM) relation but NOT under the commutativity-aware relation — i.e. pairs that
+// share ONLY a commutative bal:/rep: write-write. These are the additive settlement credits
+// a dependency-oblivious executor FALSE-serializes (and a real optimistic Block-STM would
+// abort + re-execute on, a cost AGNT2 elides for free). It is the COMPUTED upper endpoint of
+// the non-headline retry sensitivity band (multiplied by an op's own re-execution cost),
+// which can only INCREASE the baseline's cost — so it strengthens the AGNT2 delta rather than
+// inflating it, and introduces no tunable abort-rate parameter. O(n^2); fine at N<=200.
+func FalseConflictEdges(txs []*types.Transaction, signer types.Signer) int {
+	rws := make([]RWSet, len(txs))
+	for i, tx := range txs {
+		rws[i] = DeclareRW(tx, signer)
+	}
+	n := 0
+	for i := range txs {
+		for j := 0; j < i; j++ {
+			if ConflictsConservative(rws[j], rws[i]) && !Conflicts(rws[j], rws[i]) {
+				n++
+			}
+		}
+	}
+	return n
+}

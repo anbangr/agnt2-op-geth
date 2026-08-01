@@ -61,6 +61,7 @@ func BenchmarkComposedStep(b *testing.B) {
 		{"compose_fanin_1", benchCompose(b, signer, k, cfg.ChainID, 1)},
 		{"compose_fanin_3", benchCompose(b, signer, k, cfg.ChainID, 3)},
 		{"compose_fanin_10", benchCompose(b, signer, k, cfg.ChainID, 10)},
+		{"compose_fanin_16", benchCompose(b, signer, k, cfg.ChainID, 16)}, // E-A forkjoin-w16 cost (locked, not interpolated)
 		{"compose_fanin_50", benchCompose(b, signer, k, cfg.ChainID, 50)},
 	}
 	for _, c := range cases {

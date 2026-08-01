@@ -14,6 +14,7 @@ package agnt2exec
 // 1000x claim its honest floor.
 
 import (
+	"sort"
 	"time"
 
 	"github.com/ethereum/go-ethereum/core/types"
@@ -162,4 +163,94 @@ func assemble(wave []int, n int) *Schedule {
 		}
 	}
 	return &Schedule{WaveOf: wave, Waves: waves, Work: n, Span: span, Width: width}
+}
+
+// WidthBoundedMakespan is the wave-barriered makespan of a wave partition on W identical
+// workers: each conflict-free wave is list-scheduled (LPT) onto W workers and the whole
+// schedule is the SUM of per-wave makespans (a hard barrier between waves, faithful to the
+// wg.Wait() barrier in RunParallel). It is host-INDEPENDENT (pure arithmetic over the wave
+// partition + the per-op cost model — no goroutines, no core count) and DETERMINISTIC, so
+// applying the identical formula to two arms cancels any model bias in their RATIO.
+//
+// It is a STRICT GENERALIZATION of Schedule.ParallelTimeModel's `parallel`: W=1 collapses to
+// the serial sum of all costs; W>=Schedule.Width recovers the unbounded-width `parallel`
+// time (each wave's makespan is its slowest op). W=16 is the honest finite-width point in
+// between (matching the forkjoin fan-out). LPT is within (4/3 - 1/(3W)) of optimal.
+func WidthBoundedMakespan(waves [][]int, cost func(op int) time.Duration, W int) time.Duration {
+	if W < 1 {
+		W = 1
+	}
+	var total time.Duration
+	for _, wave := range waves {
+		if len(wave) == 0 {
+			continue
+		}
+		costs := make([]time.Duration, len(wave))
+		for i, op := range wave {
+			costs[i] = cost(op)
+		}
+		total += lptMakespan(costs, W)
+	}
+	return total
+}
+
+// lptMakespan list-schedules `costs` onto W identical workers longest-processing-time-first
+// (sort descending, assign each to the least-loaded worker) and returns the max worker load
+// — the wave's makespan. Deterministic; O(k log k + k*W) for a k-op wave.
+func lptMakespan(costs []time.Duration, W int) time.Duration {
+	if W < 1 {
+		W = 1
+	}
+	sorted := append([]time.Duration(nil), costs...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] > sorted[j] })
+	load := make([]time.Duration, W)
+	for _, c := range sorted {
+		mi := 0 // least-loaded worker
+		for w := 1; w < W; w++ {
+			if load[w] < load[mi] {
+				mi = w
+			}
+		}
+		load[mi] += c
+	}
+	var mx time.Duration
+	for _, l := range load {
+		if l > mx {
+			mx = l
+		}
+	}
+	return mx
+}
+
+// GrahamAreaBound is the per-wave area lower bracket Sum_waves max(maxOp_w, ceil(sum_w/W)):
+// an auditable lower bound that the LPT makespan must sit at or above (LPT <= 4/3 * OPT), so
+// a reviewer can bracket every reported width-bounded number without trusting the scheduler.
+func GrahamAreaBound(waves [][]int, cost func(op int) time.Duration, W int) time.Duration {
+	if W < 1 {
+		W = 1
+	}
+	var total time.Duration
+	for _, wave := range waves {
+		if len(wave) == 0 {
+			continue
+		}
+		var sum, mx time.Duration
+		for _, op := range wave {
+			c := cost(op)
+			sum += c
+			if c > mx {
+				mx = c
+			}
+		}
+		area := sum / time.Duration(W) // ceil(sum/W)
+		if sum%time.Duration(W) != 0 {
+			area++
+		}
+		if mx > area {
+			total += mx
+		} else {
+			total += area
+		}
+	}
+	return total
 }
