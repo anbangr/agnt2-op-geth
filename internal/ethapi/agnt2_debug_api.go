@@ -19,15 +19,40 @@ package ethapi
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/internal/agnt2debug"
 )
 
 // Agnt2DebugAPI exposes debug methods for the E4.6 local follower harness.
-// All methods are guarded by chain_id == 9001 to prevent accidental use on mainnet.
+// All methods are guarded by an allowlist of development chain ids (see
+// agnt2DebugChainIDs) to prevent accidental use on a chain that carries value.
 type Agnt2DebugAPI struct {
 	b Backend
+}
+
+// agnt2DebugChainIDs is the set of chain ids on which the AGNT2 Byzantine-injection
+// debug API may be used. Both are local development/test chains that never carry
+// value:
+//
+//	9001 - the AGNT2 devnet (chain-config/devnet-agnt2), used by the e4 correctness scripts
+//	 901 - the standard OP-Stack devnet L2, used by op-e2e's in-process clusters
+//
+// This is defense in depth, not the only gate: these methods live in the "debug" RPC
+// namespace, which an operator must explicitly expose.
+var agnt2DebugChainIDs = map[uint64]struct{}{
+	9001: {},
+	901:  {},
+}
+
+// requireAgnt2DebugChain reports an error unless chainID is an allowlisted AGNT2
+// development chain.
+func requireAgnt2DebugChain(chainID uint64, method string) error {
+	if _, ok := agnt2DebugChainIDs[chainID]; !ok {
+		return fmt.Errorf("%s is only available on AGNT2 development chains (chain_id 9001 or 901), got %d", method, chainID)
+	}
+	return nil
 }
 
 // NewAgnt2DebugAPI creates an Agnt2DebugAPI instance.
@@ -46,14 +71,14 @@ func (api *Agnt2DebugAPI) chainID(ctx context.Context) (uint64, error) {
 // SetBadRoot injects a bad typedOpRoot for blockNumber. On the next block at that
 // number the sequencer will emit a block whose TypedOpRoot mismatches the real root,
 // causing the follower's block validator to increment engine_invalid_block_count.
-// Only works when chain_id == 9001.
+// Only works on an allowlisted AGNT2 development chain (see agnt2DebugChainIDs).
 func (api *Agnt2DebugAPI) SetBadRoot(ctx context.Context, blockNumber uint64, badRoot common.Hash) error {
 	chainID, err := api.chainID(ctx)
 	if err != nil {
 		return err
 	}
-	if chainID != 9001 {
-		return errors.New("debug_setBadRoot is only available on chain_id 9001")
+	if err := requireAgnt2DebugChain(chainID, "debug_setBadRoot"); err != nil {
+		return err
 	}
 	agnt2debug.SetBadRoot(blockNumber, badRoot)
 	return nil
@@ -63,14 +88,14 @@ func (api *Agnt2DebugAPI) SetBadRoot(ctx context.Context, blockNumber uint64, ba
 // swap indices into the typed-tx slice. The sequencer will swap those two typed
 // transactions before computing the typedOpRoot, causing a topo-order mismatch
 // that the follower's block validator rejects.
-// Only works when chain_id == 9001.
+// Only works on an allowlisted AGNT2 development chain (see agnt2DebugChainIDs).
 func (api *Agnt2DebugAPI) SetBadOrder(ctx context.Context, blockNumber uint64, swapIndices []int) error {
 	chainID, err := api.chainID(ctx)
 	if err != nil {
 		return err
 	}
-	if chainID != 9001 {
-		return errors.New("debug_setBadOrder is only available on chain_id 9001")
+	if err := requireAgnt2DebugChain(chainID, "debug_setBadOrder"); err != nil {
+		return err
 	}
 	if len(swapIndices) != 2 {
 		return errors.New("swapIndices must have exactly 2 elements")
